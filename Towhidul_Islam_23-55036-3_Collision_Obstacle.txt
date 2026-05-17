@@ -1,0 +1,1473 @@
+// ══════════════════════════════════════════════════════════════
+// ░░  COLLISION CONSTANTS (tighter hitboxes)  ░░
+// ══════════════════════════════════════════════════════════════
+const float CHAR_HB_W = 0.80f;    // character hitbox width  (was 0.9)
+const float CHAR_HB_H = 1.00f;    // character hitbox height (was 0.9)
+
+// Per-type obstacle hitbox sizes (tighter than the old uniform 2.0)
+void getObstacleHitbox(int otype, int lvl, float& w, float& h) {
+    if (lvl == 2 || lvl == 4) {
+        w = 1.1f;  h = 1.1f;  // signboard
+    } else {
+        switch(otype) {
+            case 0: w = 1.3f; h = 1.3f; break;  // ball
+            case 1: w = 1.1f; h = 0.9f; break;  // mouse (narrow)
+            case 2: w = 1.1f; h = 1.1f; break;  // spiky fruit
+            default: w = 1.2f; h = 1.2f; break;
+        }
+    }
+}
+
+
+// ── Reliable damage / collision helpers ──────────────────────
+// Center-based AABB is more stable because most obstacle draw
+// functions use (x, y) as the visual centre, not the bottom-left.
+bool centerAABB(float ax, float ay, float aw, float ah,
+                float bx, float by, float bw, float bh)
+{
+    return fabs(ax - bx) <= (aw * 0.5f + bw * 0.5f) &&
+           fabs(ay - by) <= (ah * 0.5f + bh * 0.5f);
+}
+
+void finishGameOverIfNeeded()
+{
+    if (lives <= 0 && !showEndScreen) {
+        showEndScreen = true;
+        gameWon = false;
+        moving = false;
+        jumping = false;
+        playSoundForce(SND_GAMEOVER);
+        updateHiScoreForCurrentLevel();
+        saveHiScore();
+    }
+}
+
+void damagePlayer()
+{
+    // Only the short cooldown controls repeated damage.
+    // The old per-obstacle hit flag made the player look immune
+    // while standing inside the same obstacle.
+    if (!isInvincible && !showHome && !showEndScreen && lives > 0) {
+        lives--;
+        isInvincible  = true;
+        invincTimer   = 0.0f;
+        isFlashing    = true;
+        hitFlashTimer = HIT_FLASH_DURATION;
+        playSound(SND_HIT);
+        finishGameOverIfNeeded();
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  OBSTACLE RESPAWN  ░░
+// ══════════════════════════════════════════════════════════════
+int obstacleRespawnTimer[TOTAL_OBSTACLES] = {0};
+const int RESPAWN_INTERVAL = 400;   // frames before respawn eligibility
+
+bool level2Started = false;
+bool level1Started = false;
+
+// Position
+float obstaclePosX[TOTAL_OBSTACLES];
+float obstaclePosY[TOTAL_OBSTACLES];
+
+// Active & level
+bool obstacleEnabled[TOTAL_OBSTACLES];
+int obstacleLevel[TOTAL_OBSTACLES];
+bool obstacleHit[TOTAL_OBSTACLES] = {false};
+
+// Movement
+float obstacleMoveSpeedX[TOTAL_OBSTACLES];
+int obstacleMoveDirX[TOTAL_OBSTACLES];  // 1 = right, -1 = left
+float obstacleLeftBound[TOTAL_OBSTACLES];
+float obstacleRightBound[TOTAL_OBSTACLES];
+
+float obstacleMoveSpeedY[TOTAL_OBSTACLES];
+int obstacleMoveDirY[TOTAL_OBSTACLES];  // 1 = up, -1 = down
+float obstacleTopBound[TOTAL_OBSTACLES];
+float obstacleBottomBound[TOTAL_OBSTACLES];
+int obstacleType[TOTAL_OBSTACLES];
+
+// Size for collision
+float obstacleWidth  = 2.0f;
+float obstacleHeight = 2.0f;
+
+bool fireHit[TOTAL_FIRES];
+float fireX[TOTAL_FIRES];
+float fireY[TOTAL_FIRES];
+
+bool  fireOn[TOTAL_FIRES];
+float fireTimer[TOTAL_FIRES];
+
+const float FIRE_ON_TIME  = 60.0f;   // frames (~1 sec)
+const float FIRE_OFF_TIME = 60.0f;
+
+// SignBoard (per obstacle) rotation
+float signAngle[TOTAL_OBSTACLES];
+float signRotateSpeed[TOTAL_OBSTACLES];
+
+float stoneX[TOTAL_STONES];
+float stoneY[TOTAL_STONES];
+bool  stoneHit[TOTAL_STONES];
+
+// drawStone() এর original size 2..7 range
+const float STONE_SCALE = 0.18f;
+const float STONE_W = 1.0f;   // width in world units
+const float STONE_H = 1.0f;   // height in world
+
+
+
+
+
+void respawnObstacle(int i) {
+    // Pick a new random world X away from the player
+    float newX;
+    int tries = 0;
+    do {
+        int si = rand() % totalScenes;
+        float localX = -3.0f + (rand() / (float)RAND_MAX) * 12.0f;
+        newX = si * sceneWidth + localX;
+        tries++;
+    } while (fabs(newX + worldX - charX - 4.75f) < 6.0f && tries < 50);
+
+    obstaclePosX[i] = newX;
+    obstaclePosY[i] = -6.0f + (rand() / (float)RAND_MAX) * 1.5f;
+    obstacleHit[i]  = false;
+    obstacleType[i] = rand() % 3;
+
+    // Random movement after respawn
+    obstacleMoveSpeedX[i] = (rand() % 2 == 0) ? (0.025f + (rand() / (float)RAND_MAX) * 0.035f) : 0.0f;
+    obstacleMoveDirX[i]   = (rand() % 2 == 0) ? 1 : -1;
+    obstacleLeftBound[i]  = newX - 5.0f;
+    obstacleRightBound[i] = newX + 5.0f;
+
+    obstacleMoveSpeedY[i] = (rand() % 2 == 0) ? (0.015f + (rand() / (float)RAND_MAX) * 0.030f) : 0.0f;
+    obstacleMoveDirY[i]   = (rand() % 2 == 0) ? 1 : -1;
+    obstacleTopBound[i]   = -3.8f;
+    obstacleBottomBound[i]= -7.2f;
+
+    signRotateSpeed[i] = 2.0f + (rand() / (float)RAND_MAX) * 4.0f;
+    obstacleRespawnTimer[i] = 0;
+}
+void placeStones()
+{
+    float minDistance = 5.0f;
+
+    float margin = 2.0f;
+    float minLocalX = -9.0f + margin;
+    float maxLocalX =  9.0f - margin;
+
+    for (int i = 0; i < TOTAL_STONES; i++) {
+        bool valid = false;
+
+        while (!valid) {
+            int sceneIndex = rand() % totalScenes;
+            float localX = minLocalX + (rand() / (float)RAND_MAX) * (maxLocalX - minLocalX);
+            float candidateX = sceneIndex * sceneWidth + localX;
+
+            valid = true;
+            for (int j = 0; j < i; j++) {
+                if (fabs(candidateX - stoneX[j]) < minDistance) {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid) {
+                stoneX[i] = candidateX;
+                stoneY[i] = -7.5f;     // ground
+                stoneHit[i] = false;
+            }
+        }
+    }
+}
+
+void drawStone()
+{
+
+
+// FRONT POLYGON[1]
+
+    glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_POLYGON);
+                glVertex2f(-1.11f, 2.25f);
+                glVertex2f(-1.11f, 4.09f);
+                glVertex2f(-0.63f, 4.64f);
+                glVertex2f(-0.54f, 5.56f);
+                glVertex2f(0.39f, 6.06f);
+                glVertex2f(0.85f, 6.98f);
+                glVertex2f(1.5f, 7.30f);
+                glVertex2f(1.8f,5.27f);
+                glVertex2f(2.40f, 5.03f);
+                glVertex2f(2.40f, 2.77f);
+    glEnd();
+
+    // 1ST B0TTOM[2]
+
+           glColor3f(0.8f, 0.4f, 0.2f);
+            glBegin(GL_POLYGON);
+                glVertex2f(-2.3f, 2.41f);
+                 glVertex2f(-2.1f, 3.85f);
+                glVertex2f(-1.11f, 4.09f);
+                 glVertex2f(-1.11f, 2.25f);
+
+             glEnd();
+
+
+
+             // B0TTOM UP[3]
+               glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_POLYGON);
+
+                 glVertex2f(-2.1f, 3.85f);
+                 glVertex2f(-1.41f, 4.32f);
+                 glVertex2f(-0.63f, 4.64f);
+                 glVertex2f(-1.11f, 4.09f);
+
+
+             glEnd();
+            glColor3f(0.7f, 0.4f, 0.2f);
+            glBegin(GL_LINE_LOOP);
+
+                 glVertex2f(-2.1f, 3.85f);
+                 glVertex2f(-1.41f, 4.32f);
+                 glVertex2f(-0.63f, 4.64f);
+                 glVertex2f(-1.11f, 4.09f);
+
+
+             glEnd();
+
+     // B0TT0M UP UP[4]
+             glColor3f(0.7f, 0.4f, 0.2f);
+            glBegin(GL_POLYGON);
+
+                 glVertex2f(-1.41f, 4.32f);
+                 glVertex2f(-1.35f, 5.72f);
+                  glVertex2f(-0.54f, 5.56f);
+                  glVertex2f(-0.63f, 4.64f);
+
+             glEnd();
+
+// BOTTOM UP 3[5]
+          glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_POLYGON);
+
+
+                 glVertex2f(-1.35f, 5.72f);
+                  glVertex2f(-0.49f, 6.17);
+                   glVertex2f(0.39f, 6.06f);
+                    glVertex2f(-0.54f, 5.56f);
+
+             glEnd();
+             glLineWidth(2.0);
+             glColor3f(0.7f, 0.4f, 0.2f);
+            glBegin(GL_LINE_STRIP);
+
+
+                 glVertex2f(-1.35f, 5.72f);
+                  glVertex2f(-0.49f, 6.17);
+                   glVertex2f(0.39f, 6.06f);
+                    glVertex2f(-0.54f, 5.56f);
+
+             glEnd();
+//POLYGON[6]
+               glColor3f(0.8f, 0.5f, 0.2f);
+            glBegin(GL_POLYGON);
+
+
+                  glVertex2f(-0.49f, 6.17);
+                  glVertex2f(0.14f, 7.15);
+                  glVertex2f(0.85f, 6.98f);
+                  glVertex2f(0.39f, 6.06f);
+
+
+             glEnd();
+             /* glColor3f(0.8f, 0.4f, 0.2f);
+            glBegin(GL_LINE_LOOP);
+
+
+                  glVertex2f(-0.49f, 6.17);
+                  glVertex2f(0.14f, 7.15);
+                  glVertex2f(0.85f, 6.98f);
+                  glVertex2f(0.39f, 6.06f);
+
+
+             glEnd();*/
+
+    //POLY[7[7]
+     glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_POLYGON);
+
+
+                   glVertex2f(0.14f, 7.15);
+                  glVertex2f(0.80f, 7.7);
+                  glVertex2f(1.6f, 7.7f);
+                  glVertex2f(1.5f, 7.30f);
+                   glVertex2f(0.85f, 6.98f);
+
+             glEnd();
+             //
+//POLY[8]
+     glColor3f(0.7f, 0.4f, 0.2f);
+            glBegin(GL_POLYGON);
+
+                  glVertex2f(1.6f, 7.7f);
+                  glVertex2f(2.0f, 5.6);
+                  glVertex2f(1.8f, 5.27f);
+                  glVertex2f(1.5f, 7.30f);
+
+             glEnd();
+
+    //POLY[9]
+    glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_POLYGON);
+
+                  glVertex2f(2.0f, 5.6);
+                  glVertex2f(3.0f, 5.40f);
+                  glVertex2f(2.40f, 5.03f);
+                  glVertex2f(1.8f, 5.27f);
+
+
+             glEnd();
+     glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_LINE_LOOP);
+
+                  glVertex2f(2.0f, 5.6);
+                  glVertex2f(3.0f, 5.40f);
+                  glVertex2f(2.40f, 5.03f);
+                  glVertex2f(1.8f, 5.27f);
+
+
+             glEnd();
+    //POLY[10]
+    glColor3f(0.7f, 0.4f, 0.2f);
+            glBegin(GL_POLYGON);
+
+
+                  glVertex2f(3.0f, 5.40f);
+                   glVertex2f(3.30f, 3.80f);
+
+                   glVertex2f(2.40f, 2.77f);
+                   glVertex2f(2.40f, 5.03f);
+
+             glEnd();
+     glColor3f(1.0f, 0.6f, 0.2f);
+            glBegin(GL_LINE_LOOP);
+
+
+                  glVertex2f(3.0f, 5.40f);
+                   glVertex2f(3.30f, 3.80f);
+
+                   glVertex2f(2.40f, 2.77f);
+                   glVertex2f(2.40f, 5.03f);
+
+             glEnd();
+             glLineWidth(3.0);
+     glColor3f(0.7f, 0.4f, 0.0f);
+            glBegin(GL_LINE_LOOP);
+                glVertex2f(-1.11f, 2.25f);
+                glVertex2f(-1.11f, 4.09f);
+                glVertex2f(-0.63f, 4.64f);
+                glVertex2f(-0.54f, 5.56f);
+                glVertex2f(0.39f, 6.06f);
+                glVertex2f(0.85f, 6.98f);
+                glVertex2f(1.5f, 7.30f);
+                glVertex2f(1.8f,5.27f);
+                glVertex2f(2.40f, 5.03f);
+                glVertex2f(2.40f, 2.77f);
+    glEnd();
+
+             glLineWidth(2.0);
+         glColor3f(0.9f, 0.5f, 0.2f);
+            glBegin(GL_LINES);
+           glVertex2f(1.8f,5.27f);
+            glVertex2f(1.7f,4.20f);
+             glEnd();
+
+              glLineWidth(2.0);
+         glColor3f(0.9f, 0.5f, 0.2f);
+            glBegin(GL_LINES);
+           glVertex2f(-0.63f, 4.64f);
+            glVertex2f(-0.50f,3.90f);
+             glEnd();
+
+             glLineWidth(2.0);
+         glColor3f(0.9f, 0.5f, 0.2f);
+            glBegin(GL_LINES);
+          glVertex2f(0.39f, 6.06f);
+            glVertex2f(0.40f,4.0);
+             glEnd();
+               glBegin(GL_POLYGON);
+            for( int i=0;i<200;i++)
+                {
+            glColor3f(0.9f,0.5f,0.0f);
+            float pi= 3.1416;
+            float A =(i*2*pi)/200;
+            float r = 0.1;
+            float x= 2.40+r* cos(A);
+            float y= 3.60+r* sin(A);
+            glVertex2f(x,y);
+                }
+            glEnd();
+             glBegin(GL_POLYGON);
+            for( int i=0;i<200;i++)
+                {
+            glColor3f(0.9f,0.5f,0.0f);
+            float pi= 3.1416;
+            float A =(i*2*pi)/200;
+            float r = 0.1;
+            float x= 1.40+r* cos(A);
+            float y= 7.60+r* sin(A);
+            glVertex2f(x,y);
+                }
+            glEnd();
+             glBegin(GL_POLYGON);
+            for( int i=0;i<200;i++)
+                {
+            glColor3f(0.9f,0.5f,0.0f);
+            float pi= 3.1416;
+            float A =(i*2*pi)/200;
+            float r = 0.1;
+            float x= 0.20+r* cos(A);
+            float y= 4.60+r* sin(A);
+            glVertex2f(x,y);
+                }
+            glEnd();
+             glBegin(GL_POLYGON);
+            for( int i=0;i<200;i++)
+                {
+            glColor3f(0.9f,0.5f,0.0f);
+            float pi= 3.1416;
+            float A =(i*2*pi)/200;
+            float r = 0.1;
+            float x= 1.70+r* cos(A);
+            float y= 4.20+r* sin(A);
+            glVertex2f(x,y);
+                }
+            glEnd();
+
+             glBegin(GL_POLYGON);
+            for( int i=0;i<200;i++)
+                {
+            glColor3f(0.9f,0.5f,0.0f);
+            float pi= 3.1416;
+            float A =(i*2*pi)/200;
+            float r = 0.1;
+            float x= 1.20+r* cos(A);
+            float y= 5.80+r* sin(A);
+            glVertex2f(x,y);
+                }
+            glEnd();
+             //SMALL STONES1
+                float dx = 1.0f;
+            float dy = 0.0f;
+            glColor3f(0.94f, 0.5f, 0.0f);
+            glBegin(GL_POLYGON);
+
+            // 1
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-1.26f + t*t*-0.55f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 3.31f + t*t* 3.95f;
+                glVertex2f(x + dx, y - dy);
+            }
+
+            // 2
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-0.55f + 2*(1-t)*t*0.1f + t*t*0.3f;
+                float y = (1-t)*(1-t)* 3.95f + 2*(1-t)*t*3.58f + t*t*3.26f;
+                glVertex2f(x + dx, y - dy);
+            }
+
+            // 3
+            for(float t=0.0f; t<=1.0f; t+=0.02f){
+                float x = (1-t)*(1-t)*0.3f + 2*(1-t)*t*0.5f + t*t*0.4f;
+                float y = (1-t)*(1-t)*3.26f + 2*(1-t)*t*2.80f + t*t*2.30f;
+                glVertex2f(x + dx, y - dy);
+            }
+
+            // 4
+            for(float t=1.0f; t>=0.0f; t-=0.01f){
+                float x = (1-t)*(1-t)*0.0f + 2*(1-t)*t*0.1f + t*t*0.4f;
+                float y = (1-t)*(1-t)*2.20f + 2*(1-t)*t*2.04f + t*t*2.30f;
+                glVertex2f(x + dx, y - dy);
+            }
+
+            // 5
+            for(float t=1.0f; t>=0.0f; t-=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-0.10f + t*t*0.0f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 2.00f + t*t*2.20f;
+                glVertex2f(x + dx, y - dy);
+            }
+
+            glEnd();
+            // BORDER (Outline)
+             dx = 1.0f;
+             dy = 0.0f;
+
+            glLineWidth(2.5f);
+            glColor3f(0.8f, 0.4f, 0.0f);
+
+            // 1
+            glBegin(GL_LINE_STRIP);
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-1.26f + t*t*-0.55f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 3.31f + t*t* 3.95f;
+                glVertex2f(x + dx, y - dy);
+            }
+            glEnd();
+
+            // 2
+            glBegin(GL_LINE_STRIP);
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-0.55f + 2*(1-t)*t*0.1f + t*t*0.3f;
+                float y = (1-t)*(1-t)* 3.95f + 2*(1-t)*t*3.58f + t*t*3.26f;
+                glVertex2f(x + dx, y - dy);
+            }
+            glEnd();
+
+            // 3
+            glBegin(GL_LINE_STRIP);
+            for(float t=0.0f; t<=1.0f; t+=0.02f){
+                float x = (1-t)*(1-t)*0.3f + 2*(1-t)*t*0.5f + t*t*0.4f;
+                float y = (1-t)*(1-t)*3.26f + 2*(1-t)*t*2.80f + t*t*2.30f;
+                glVertex2f(x + dx, y - dy);
+            }
+            glEnd();
+
+            // 5
+            glBegin(GL_LINE_STRIP);
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*0.0f + 2*(1-t)*t*0.1f + t*t*0.4f;
+                float y = (1-t)*(1-t)*2.20f + 2*(1-t)*t*2.04f + t*t*2.30f;
+                glVertex2f(x + dx, y - dy);
+            }
+            glEnd();
+
+            // 4
+            glBegin(GL_LINE_STRIP);
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-0.10f + t*t*0.0f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 2.00f + t*t*2.20f;
+                glVertex2f(x + dx, y - dy);
+            }
+            glEnd();
+
+
+                // SMALL STONE 2
+                glColor3f(0.94f, 0.5f, 0.0f);
+
+                glBegin(GL_POLYGON);
+
+
+
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-1.26f + t*t*-0.55f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 3.31f + t*t* 3.95f;
+                glVertex2f(x,y);
+            }
+
+
+            for(float t=0.0f; t<=1.0f; t+=0.01f){
+                float x = (1-t)*(1-t)*-0.55f + 2*(1-t)*t*0.1f + t*t*0.3f;
+                float y = (1-t)*(1-t)* 3.95f + 2*(1-t)*t*3.58f + t*t*3.26f;
+                glVertex2f(x,y);
+            }
+
+
+            for(float t=0.0f; t<=1.0f; t+=0.02f){
+                float x = (1-t)*(1-t)*0.3f + 2*(1-t)*t*0.5f + t*t*0.4f;
+                float y = (1-t)*(1-t)*3.26f + 2*(1-t)*t*2.80f + t*t*2.30f;
+                glVertex2f(x,y);
+            }
+
+
+
+            for(float t=1.0f; t>=0.0f; t-=0.01f){
+                float x = (1-t)*(1-t)*0.0f + 2*(1-t)*t*0.1f + t*t*0.4f;
+                float y = (1-t)*(1-t)*2.20f + 2*(1-t)*t*2.04f + t*t*2.30f;
+                glVertex2f(x,y);
+            }
+
+            for(float t=1.0f; t>=0.0f; t-=0.01f){
+                float x = (1-t)*(1-t)*-1.29f + 2*(1-t)*t*-0.10f + t*t*0.0f;
+                float y = (1-t)*(1-t)* 2.36f + 2*(1-t)*t* 2.00f + t*t*2.20f;
+                glVertex2f(x,y);
+            }
+
+            glEnd();
+            //SMALL STONE BORDER
+                glLineWidth(3.0);
+                glColor3f(0.7f, 0.4f, 0.0f);
+                glBegin(GL_LINE_STRIP);
+
+                for(float t = 0.0f; t <= 1.0f; t += 0.01f)
+                {
+                    float x =(1 - t)*(1 - t)*-1.29f +2*(1 - t)*t*-1.26f +t*t*-0.55f;
+                    float y =(1 - t)*(1 - t)*2.36f +2*(1 - t)*t*3.31f +t*t*3.95f;
+                    glVertex2f(x, y);
+                }
+                glEnd();
+
+                 glLineWidth(3.0);
+                glColor3f(0.8f, 0.4f, 0.0f);
+                glBegin(GL_LINE_STRIP);
+
+                for(float t = 0.0f; t <= 1.0f; t += 0.01f)
+                {
+                    float x =(1 - t)*(1 - t)*-0.55f +2*(1 - t)*t*0.1f +t*t*0.3f;
+                    float y =(1 - t)*(1 - t)*3.95f +2*(1 - t)*t*3.58f +t*t*3.26f;
+                    glVertex2f(x, y);
+                }
+
+                glEnd();
+                 glLineWidth(3.0);
+                glColor3f(0.8f, 0.4f, 0.0f);
+                glBegin(GL_LINE_STRIP);
+
+                for(float t = 0.0f; t <= 1.0f; t += 0.02f)
+                {
+                    float x =
+                    (1 - t)*(1 - t)*0.3f +2*(1 - t)*t*0.5f +t*t*0.4f;
+                    float y =(1 - t)*(1 - t)*3.26f +2*(1 - t)*t*2.80f +t*t*2.30f;
+                    glVertex2f(x, y);
+                }
+                 glEnd();
+                 glLineWidth(3.0);
+                glColor3f(0.7f, 0.4f, 0.0f);
+                glBegin(GL_LINE_STRIP);
+
+                for(float t = 0.0f; t <= 1.0f; t += 0.01f)
+                {
+                    float x =(1 - t)*(1 - t)*-1.29f +2*(1 - t)*t*-0.10 +t*t*0.0f;
+                    float y =(1 - t)*(1 - t)*2.36f +2*(1 - t)*t*2.00f +t*t*2.20f;
+                    glVertex2f(x, y);
+                }
+                glEnd();
+
+                 glLineWidth(3.0);
+                glColor3f(0.7f, 0.4f, 0.0f);
+                glBegin(GL_LINE_STRIP);
+
+                for(float t = 0.0f; t <= 1.0f; t += 0.01f)
+                {
+                    float x =(1 - t)*(1 - t)*0.0+2*(1 - t)*t*0.1 +t*t*0.4f;
+                    float y =(1 - t)*(1 - t)*2.20f +2*(1 - t)*t*2.04f +t*t*2.30f;
+                    glVertex2f(x, y);
+                }
+                glEnd();
+
+}
+
+void drawStones()
+{
+    for (int i = 0; i < TOTAL_STONES; i++) {
+        float drawX = stoneX[i] + worldX;
+        float drawY = stoneY[i];
+
+        glPushMatrix();
+        glTranslatef(drawX, drawY, 0.0f);
+
+
+        glScalef(STONE_SCALE*3.2, STONE_SCALE*3.2, 1.0f);
+        glTranslatef(0.0f, -2.25, 0.0f);
+
+        drawStone();
+        glPopMatrix();
+    }
+  }
+void checkStones()
+{
+    float charScreenX = charX + 4.75f;
+    float charScreenY = charY + 0.45f;
+
+    for (int i = 0; i < TOTAL_STONES; i++) {
+        float sx = stoneX[i] + worldX;
+        float sy = stoneY[i] + 0.35f;
+
+        bool hit = centerAABB(charScreenX, charScreenY, CHAR_HB_W, CHAR_HB_H,
+                              sx, sy, STONE_W * 2.0f, STONE_H * 1.5f);
+
+        if (hit) {
+            stoneHit[i] = true;
+            damagePlayer();
+        } else {
+            stoneHit[i] = false;
+        }
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+void signBoard()
+{
+    float cx = 0.0f;
+    float cy = 0.0f;   // IMPORTANT: center for rotation
+    float r = 1.5f;
+
+    // Board fill
+    glColor3f(0.9f, 0.75f, 0.45f);
+    glBegin(GL_POLYGON);
+    for(int i = 0; i <= 360; i++)
+    {
+        float a = i * 3.1416f / 180.0f;
+        glVertex2f(cx + r * cos(a), cy + r * sin(a));
+    }
+    glEnd();
+
+    // Inner panel
+    glColor3f(0.98f, 0.90f, 0.75f);
+    glBegin(GL_POLYGON);
+    for(int i = 0; i <= 360; i++)
+    {
+        float a = i * 3.1416f / 180.0f;
+        glVertex2f(cx + (r - 0.3f) * cos(a), cy + (r - 0.3f) * sin(a));
+    }
+    glEnd();
+
+    glLineWidth(3.0f);
+    glColor3f(0.3f, 0.15f, 0.05f);
+    glBegin(GL_LINE_LOOP);
+    for(int i = 0; i <= 360; i++)
+    {
+        float a = i * 3.1416f / 180.0f;
+        glVertex2f(cx + r * cos(a), cy + r * sin(a));
+    }
+    glEnd();
+
+    glColor3f(0.2f, 0.2f, 0.2f);
+    for(float x = -r+0.2f; x <= r-0.2f; x += 2*r-0.4f)
+    {
+        glBegin(GL_POLYGON);
+        for(int i = 0; i < 360; i++)
+        {
+            float a = i * 3.1416f / 180.0f;
+            glVertex2f(x + 0.06f * cos(a), cy + 0.05f + 0.06f * sin(a));
+        }
+        glEnd();
+    }
+}
+void drawRotatingSignBoard(float x, float y, int i)
+{
+    glPushMatrix();
+
+    glTranslatef(x, y, 0.0f);                 // obstacle position
+    glRotatef(signAngle[i], 0.0f, 0.0f, 1.0f); // rotate around center
+
+    signBoard(); // draw the object
+
+    glPopMatrix();
+}
+
+void placeManholeFire()
+{
+    float minX = -7.0f;
+    float maxX =  7.0f;
+
+    for (int i = 0; i < TOTAL_FIRES; i++) {
+        int sceneIndex = rand() % totalScenes;
+        float localX = minX + (rand() / (float)RAND_MAX) * (maxX - minX);
+
+        fireX[i] = sceneIndex * sceneWidth + localX;
+        fireY[i] = -6.5f;          // ground  manhole position
+
+        fireOn[i] = false;
+        fireTimer[i] = 0.0f;
+        fireHit[i] = false;
+    }
+}
+void updateManholeFire()
+{
+    for (int i = 0; i < TOTAL_FIRES; i++) {
+        fireTimer[i]++;
+        if (fireOn[i]) {
+            if (fireTimer[i] > FIRE_ON_TIME) {
+                fireOn[i] = false;
+                fireTimer[i] = 0.0f;
+                fireHit[i] = false;
+            }
+        }else {
+            if (fireTimer[i] > FIRE_OFF_TIME) {
+                fireOn[i] = true;
+                fireTimer[i] = 0.0f;
+            }
+        }
+    }
+}
+void drawManholeFire()
+{
+    for (int i = 0; i < TOTAL_FIRES; i++) {
+
+        float drawX = fireX[i] + worldX;
+        float drawY = fireY[i];
+
+        // ---- Manhole (static) ----
+        glColor3f(0.2f, 0.2f, 0.2f);
+        glBegin(GL_POLYGON);
+        for (int a = 0; a < 360; a++) {
+            float rad = a * 3.1416f / 180.0f;
+            glVertex2f(drawX + 0.6f * cos(rad), drawY + 0.15f * sin(rad));
+        }
+        glEnd();
+
+        // ---- Fire (only when ON) ----
+        if (fireOn[i]) {
+            float flameH = 1.2f + 0.2f * sin(glutGet(GLUT_ELAPSED_TIME) * 0.01f);
+
+            glBegin(GL_TRIANGLES);
+            glColor3f(1.0f, 0.4f, 0.0f);
+            glVertex2f(drawX - 0.3f, drawY);
+            glVertex2f(drawX + 0.3f, drawY);
+            glColor3f(1.0f, 0.9f, 0.0f);
+            glVertex2f(drawX, drawY + flameH);
+            glEnd();
+        }
+    }
+}
+void checkManholeFire()
+{
+    float charScreenX = charX + 4.75f;
+    float charScreenY = charY + 0.45f;
+
+    for (int i = 0; i < TOTAL_FIRES; i++) {
+        if (!fireOn[i]) {
+            fireHit[i] = false;
+            continue;
+        }
+
+        float fx = fireX[i] + worldX;
+        float fy = fireY[i] + 0.65f;  // flame centre
+
+        bool hit = centerAABB(charScreenX, charScreenY, CHAR_HB_W, CHAR_HB_H,
+                              fx, fy, 1.2f, 1.3f);
+
+        if (hit) {
+            fireHit[i] = true;
+            damagePlayer();
+        } else {
+            fireHit[i] = false;
+        }
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+void drawBall(float x, float y) {
+    int numSegments = 40;
+float radius = 1.0f;
+glBegin(GL_TRIANGLE_FAN);
+
+// --- Center color (darker pink) ---
+glColor3f(0.9f, 0.3f, 0.6f);
+glVertex2f(x, y);   // center
+
+for (int i = 0; i <= numSegments; i++) {
+    float angle = 2.0f * 3.14159f * i / numSegments;
+    float px = x + cos(angle) * radius;
+    float py = y + sin(angle) * radius;
+
+    // --- Edge color (lighter pink) ---
+    glColor3f(1.0f, 0.7f, 0.85f);
+    glVertex2f(px, py);
+}
+
+glEnd();
+}
+
+void drawMouse(float x, float y, float scale = 1.0f) {
+    glBegin(GL_LINE_LOOP);
+    glLineWidth(3);
+    glColor3f(0.0f, 0.0f, 0.0f); // outline
+    glVertex2f(x + (-0.4f * scale), y + (0.0f * scale));
+    glVertex2f(x + (-0.04f * scale), y + (0.12f * scale));
+    glVertex2f(x + (-0.05f * scale), y + (-0.15f * scale));
+    glEnd();
+
+    drawCircle(x + 0.06999f * scale, y + -0.02158f * scale, 0.177f * scale, 0.75f, 0.75f, 0.78f); // body
+
+    glBegin(GL_POLYGON);
+    glColor3f(0.75f, 0.75f, 0.78f);
+    glVertex2f(x + (-0.4f * scale), y + (0.0f * scale));
+    glVertex2f(x + (-0.04f * scale), y + (0.12f * scale));
+    glVertex2f(x + (-0.05f * scale), y + (-0.15f * scale));
+    glEnd();
+
+    drawCircle(x + -0.09946f * scale, y + 0.15048f * scale, 0.112f * scale, 0.75f, 0.75f, 0.78f); // ear
+    drawCircle(x + -0.10468f * scale, y + 0.15569f * scale, 0.055f * scale, 0.95f, 0.7f, 0.75f);  // inner ear
+    drawCircle(x + -0.4f * scale, y + 0.0f * scale, 0.02f * scale, 0.0f, 0.0f, 0.0f);              // nose
+    drawCircle(x + -0.2f * scale, y + 0.02f * scale, 0.02f * scale, 0.0f, 0.0f, 0.0f);            // eye
+
+    // Tail
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+        glVertex2f(x + 0.24f * scale, y + -0.01f * scale);
+        glVertex2f(x + 0.4f * scale, y + 0.06f * scale);
+    glEnd();
+
+    // Whiskers
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glLineWidth(1.5f);
+    glBegin(GL_LINES);
+        glVertex2f(x + -0.05f * scale, y + -0.01f * scale); glVertex2f(x + -0.15f * scale, y + -0.01f * scale);
+        glVertex2f(x + -0.05f * scale, y + -0.03f * scale); glVertex2f(x + -0.15f * scale, y + -0.03f * scale);
+    glEnd();
+
+    glFlush();
+}
+
+void drawSpikyFruit(float x, float y, float scale = 1.0f) {
+    float radius = 0.2f * scale;
+    int spikes = 20;
+
+    drawCircle(x, y, radius, 0.0f, 0.0f, 0.0f); // center
+
+    for (int i = 0; i < spikes; i++) {
+        float angle = 2.0f * 3.1415926f * i / spikes;
+        float spikeLength = radius * 0.5f;
+
+        glBegin(GL_TRIANGLES);
+        glColor3f(0.0f, 0.0f, 0.0f);
+
+        glVertex2f(x + radius * cos(angle), y + radius * sin(angle));
+        glVertex2f(x + radius * cos(angle + 0.1f), y + radius * sin(angle + 0.1f));
+        glVertex2f(x + (radius + spikeLength) * cos(angle + 0.05f), y + (radius + spikeLength) * sin(angle + 0.05f));
+
+        glEnd();
+    }
+    glFlush();
+}
+
+void placeCollectibles() {
+    float minDistance = 3.0f;     // reduced for 10 cakes
+    float minX = 0.0f;
+    float maxX = 12.0f;
+
+    // Dora cakes (10 per level)
+    for (int i = 0; i < 10; i++) {
+        bool valid = false;
+        while (!valid) {
+            int sceneIndex = rand() % totalScenes;
+            float localX = minX + (rand() / (float)RAND_MAX) * (maxX - minX);
+            float candidateX = sceneIndex * sceneWidth + localX;
+
+            valid = true;
+            for (int j = 0; j < i; j++) {
+                if (fabs(candidateX - doracakeX[j]) < minDistance) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                doracakeX[i] = candidateX;
+                doracakeY[i] = -6.0f;
+                doracakeCollected[i] = false;
+            }
+        }
+    }
+
+    // Hearts
+    for (int i = 0; i < 3; i++) {
+        bool valid = false;
+        while (!valid) {
+            int sceneIndex = rand() % totalScenes;
+            float localX = minX + (rand() / (float)RAND_MAX) * (maxX - minX);
+            float candidateX = sceneIndex * sceneWidth + localX;
+
+            valid = true;
+            for (int j = 0; j < i; j++) {
+                if (fabs(candidateX - heartX[j]) < minDistance) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                heartX[i] = candidateX;
+                heartY[i] = -6.0f + 0.5f;
+                heartLost[i] = false;
+            }
+        }
+    }
+
+    doracakesCollected = 0;
+    lives = totalHearts;
+}
+
+void checkCollectibles() {
+    float collectRadius = 2.0f;
+
+    float charScreenX = charX + 4.75f;
+    float charScreenY = charY + 0.1f;
+
+    // Dora cakes (10 per level)
+    for (int i = 0; i < 10; i++) {
+        if (!doracakeCollected[i]) {
+            float cakeScreenX = doracakeX[i] + worldX;
+            float cakeScreenY = doracakeY[i];
+
+            float dx = charScreenX - cakeScreenX;
+            float dy = charScreenY - cakeScreenY;
+
+            if (dx * dx + dy * dy < collectRadius * collectRadius) {
+                doracakeCollected[i] = true;
+                doracakesCollected++;
+                score += 100;
+                levelScore += 100;
+                updateHiScoreForCurrentLevel();
+                playSound(SND_COLLECT);
+            }
+        }
+    }
+
+    // Hearts
+    for (int i = 0; i < 3; i++) {
+        if (!heartLost[i]) {
+            float heartScreenX = heartX[i] + worldX;
+            float heartScreenY = heartY[i];
+
+            float dx = charScreenX - heartScreenX;
+            float dy = charScreenY - heartScreenY;
+
+            if (dx * dx + dy * dy < collectRadius * collectRadius) {
+                heartLost[i] = true;
+                if (lives < totalHearts) {
+                    lives++;
+                }
+            }
+        }
+    }
+
+    // Level complete: do NOT jump to next level automatically.
+    // Save the level high score and return directly to the main menu.
+    if (doracakesCollected >= 10) {
+        completeLevelAndReturnHome();
+    }
+}
+
+
+void placeObstacles() {
+    float minDistance = 6.0f;
+    float minX = -3.0f;
+    float maxX = 9.0f;
+
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        bool valid = false;
+
+        while (!valid) {
+            int sceneIndex = rand() % totalScenes;
+            float localX = minX + (rand() / (float)RAND_MAX) * (maxX - minX);
+            float candidateX = sceneIndex * sceneWidth + localX;
+
+            valid = true;
+
+            for (int j = 0; j < i; j++) {
+                if (fabs(candidateX - obstaclePosX[j]) < minDistance) {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid) {
+                obstaclePosX[i] = candidateX;
+                obstaclePosY[i] = -6.0f;
+
+                obstacleLevel[i] = currentLevel;
+                obstacleEnabled[i] = true;
+                obstacleHit[i] = false;
+                obstacleRespawnTimer[i] = 0;
+                obstacleType[i] = rand() % 3;
+
+                // Horizontal movement (Left–Right)
+                if (rand() % 3 == 0) {
+                    obstacleMoveSpeedX[i] = 0.03f;
+                    obstacleMoveDirX[i] = 1;
+                    obstacleLeftBound[i]  = sceneIndex * sceneWidth - 9.0f;
+                    obstacleRightBound[i] = sceneIndex * sceneWidth + 9.0f;
+                } else {
+                    obstacleMoveSpeedX[i] = 0.0f;
+                    obstacleMoveDirX[i] = 0;
+                    obstacleLeftBound[i]  = 0;
+                    obstacleRightBound[i] = 0;
+                }
+
+                // Vertical movement (Up–Down or falling)
+                int verticalType = rand() % 3;
+                if (verticalType == 0) {
+                    obstacleMoveSpeedY[i] = 0.02f;
+                    obstacleMoveDirY[i] = 1;
+                    obstacleTopBound[i] = -4.0f;
+                    obstacleBottomBound[i] = -7.0f;
+                } else if (verticalType == 1) {
+                    obstacleMoveSpeedY[i] = 0.04f;
+                    obstacleMoveDirY[i] = -1;
+                    obstacleTopBound[i] = obstaclePosY[i];
+                    obstacleBottomBound[i] = -10.0f;
+                } else { // static
+                    obstacleMoveSpeedY[i] = 0.0f;
+                    obstacleMoveDirY[i] = 0;
+                    obstacleTopBound[i] = 0;
+                    obstacleBottomBound[i] = 0;
+                }
+                signAngle[i] = 0.0f;
+                signRotateSpeed[i] = 3.0f;
+            }
+        }
+    }
+}
+
+void updateObstacles() {
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        if (!obstacleEnabled[i]) continue;
+        if (obstacleLevel[i] != currentLevel) continue;
+
+        // Random respawn: when obstacle drifts far offscreen
+        obstacleRespawnTimer[i]++;
+        float screenX = obstaclePosX[i] + worldX;
+        if ((screenX < -14.0f || screenX > 14.0f) &&
+            obstacleRespawnTimer[i] > RESPAWN_INTERVAL) {
+            respawnObstacle(i);
+            obstacleLevel[i] = currentLevel;
+            obstacleEnabled[i] = true;
+        }
+
+        obstaclePosX[i] += obstacleMoveSpeedX[i] * obstacleMoveDirX[i];
+        if (obstacleMoveSpeedX[i] > 0) {
+            if (obstaclePosX[i] >= obstacleRightBound[i])
+                obstacleMoveDirX[i] = -1;
+            if (obstaclePosX[i] <= obstacleLeftBound[i])
+                obstacleMoveDirX[i] = 1;
+        }
+
+        obstaclePosY[i] += obstacleMoveSpeedY[i] * obstacleMoveDirY[i];
+        if (obstacleMoveSpeedY[i] > 0) {
+            if (obstacleMoveDirY[i] == 1 && obstaclePosY[i] >= obstacleTopBound[i])
+                obstacleMoveDirY[i] = -1;
+            if (obstacleMoveDirY[i] == -1 && obstaclePosY[i] <= obstacleBottomBound[i])
+                obstacleMoveDirY[i] = 1;
+        }
+        signAngle[i] += signRotateSpeed[i];
+        if (signAngle[i] >= 360.0f)
+            signAngle[i] -= 360.0f;
+    }
+}
+
+void checkObstacles() {
+    float charScreenX = charX + 4.75f;
+    float charScreenY = charY + 0.45f;   // center-ish body point for stable hits
+
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        if (!obstacleEnabled[i]) continue;
+        if (obstacleLevel[i] != currentLevel) continue;
+
+        float obsScreenX = obstaclePosX[i] + worldX;
+        float obsScreenY = obstaclePosY[i];
+
+        float obsW, obsH;
+        getObstacleHitbox(obstacleType[i], currentLevel, obsW, obsH);
+
+        bool hit = centerAABB(charScreenX, charScreenY, CHAR_HB_W, CHAR_HB_H,
+                              obsScreenX, obsScreenY, obsW, obsH);
+
+        if (hit) {
+            obstacleHit[i] = true;
+            damagePlayer();
+        } else {
+            obstacleHit[i] = false;
+        }
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+// ░░  FALLING ROCKS  (Level 4 new hazard)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void initFallingRocks() {
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        int si = rand() % totalScenes;
+        rockPosX[i]    = si * sceneWidth + (-7.0f + (rand()/(float)RAND_MAX)*14.0f);
+        rockPosY[i]    = 6.0f + (rand()/(float)RAND_MAX) * 5.0f;
+        rockVelocity[i]= 0.055f + (rand()/(float)RAND_MAX) * 0.065f;
+        rockIsHit[i]   = false;
+    }
+}
+
+void updateFallingRocks() {
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        rockPosY[i] -= rockVelocity[i];
+        if (rockPosY[i] < -8.6f) {
+            int si = rand() % totalScenes;
+            rockPosX[i] = si * sceneWidth + (-7.0f + (rand()/(float)RAND_MAX)*14.0f);
+            rockPosY[i] = 9.5f;
+            rockIsHit[i] = false;
+        }
+    }
+}
+
+void drawFallingRocks() {
+    // Constant local array — 5 pts of the rock polygon
+    static const float px[5] = { 0.00f,  0.55f,  0.35f, -0.35f, -0.55f};
+    static const float py[5] = { 0.55f,  0.20f, -0.45f, -0.45f,  0.20f};
+
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        float dx = rockPosX[i] + worldX;
+        float dy = rockPosY[i];
+        if (dx < -12.0f || dx > 12.0f) continue;
+
+        // Fill
+        glColor3f(0.45f, 0.40f, 0.36f);
+        glBegin(GL_POLYGON);
+        for (int j = 0; j < 5; j++)
+            glVertex2f(dx + px[j], dy + py[j]);
+        glEnd();
+
+        // Dark outline
+        glColor3f(0.22f, 0.18f, 0.16f);
+        glLineWidth(2.0f);
+        glBegin(GL_LINE_LOOP);
+        for (int j = 0; j < 5; j++)
+            glVertex2f(dx + px[j], dy + py[j]);
+        glEnd();
+        glLineWidth(1.0f);
+
+        // Crack accent
+        glColor3f(0.18f, 0.14f, 0.12f);
+        glBegin(GL_LINES);
+            glVertex2f(dx - 0.08f, dy + 0.30f);
+            glVertex2f(dx + 0.22f, dy - 0.10f);
+            glVertex2f(dx + 0.22f, dy - 0.10f);
+            glVertex2f(dx + 0.05f, dy - 0.35f);
+        glEnd();
+
+        // Motion blur streak above rock
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.40f, 0.35f, 0.30f, 0.35f);
+        glBegin(GL_QUADS);
+            glVertex2f(dx - 0.35f, dy + 0.55f);
+            glVertex2f(dx + 0.35f, dy + 0.55f);
+            glVertex2f(dx + 0.20f, dy + 1.30f);
+            glVertex2f(dx - 0.20f, dy + 1.30f);
+        glEnd();
+        glDisable(GL_BLEND);
+    }
+}
+
+void checkFallingRocks() {
+    if (showEndScreen) return;
+
+    float csx = charX + 4.75f;
+    float csy = charY + 0.45f;
+
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        float rx = rockPosX[i] + worldX;
+        float ry = rockPosY[i];
+
+        bool hit = centerAABB(csx, csy, CHAR_HB_W, CHAR_HB_H,
+                              rx, ry, 1.2f, 1.2f);
+
+        if (hit) {
+            rockIsHit[i] = true;
+            damagePlayer();
+        } else {
+            rockIsHit[i] = false;
+        }
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  TWINKLING STARS  (Level 5 sky decoration)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void initStars() {
+    for (int i = 0; i < STAR_COUNT; i++) {
+        starPosX[i]  = -9.5f + (rand()/(float)RAND_MAX) * 19.0f;
+        starPosY[i]  =  1.0f + (rand()/(float)RAND_MAX) *  9.0f;
+        starPhase[i] = (rand()/(float)RAND_MAX) * 6.2832f;
+    }
+}
+
+void drawStars() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPointSize(2.2f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < STAR_COUNT; i++) {
+        float bright = 0.45f + 0.55f * sinf(starTime5 * 0.028f + starPhase[i]);
+        glColor4f(1.0f, 0.98f, 0.88f, bright);
+        glVertex2f(starPosX[i], starPosY[i]);
+    }
+    glEnd();
+    // A few larger "bright" stars
+    glPointSize(3.8f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < STAR_COUNT; i += 12) {
+        float bright = 0.60f + 0.40f * sinf(starTime5 * 0.018f + starPhase[i] + 1.0f);
+        glColor4f(0.96f, 0.94f, 1.0f, bright);
+        glVertex2f(starPosX[i], starPosY[i]);
+    }
+    glEnd();
+    glPointSize(1.0f);
+    glDisable(GL_BLEND);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  GHOST ENEMY  (Level 5 chasing hazard)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void resetGhost() {
+    ghostPosX  = charX - 18.0f;
+    ghostPosY  = -6.5f;
+    ghostIsHit = false;
+}
+
+void drawGhostEnemy(float gx, float gy) {
+    float sc = 1.25f;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Outer glow
+    glBegin(GL_POLYGON);
+    for (int i = 0; i < 40; i++) {
+        float a = i * 2.0f * 3.14159f / 40;
+        float br = sc * (1.25f + 0.08f * sinf(a * 3));
+        glColor4f(0.55f, 0.80f, 1.0f, 0.18f);
+        glVertex2f(gx + br * cosf(a), gy + br * 1.3f * sinf(a));
+    }
+    glEnd();
+
+    // Body – top semicircle
+    glBegin(GL_POLYGON);
+    for (int i = 0; i <= 180; i++) {
+        float a = i * 3.14159f / 180.0f;
+        glColor4f(0.78f, 0.92f, 1.0f, 0.80f);
+        glVertex2f(gx + sc * cosf(a), gy + sc * 1.4f * sinf(a));
+    }
+    // Wavy hem at the bottom
+    for (int i = 0; i <= 8; i++) {
+        float t  = (float)i / 8.0f;
+        float wx = gx + sc * (1.0f - 2.0f * t);
+        float wy = gy - sc * 0.50f * (1.0f + 0.40f * sinf(t * 3.14159f * 3));
+        glColor4f(0.78f, 0.92f, 1.0f, 0.80f);
+        glVertex2f(wx, wy);
+    }
+    glEnd();
+
+    // Eyes – dark
+    for (int side = -1; side <= 1; side += 2) {
+        float ex = gx + side * 0.36f * sc;
+        float ey = gy + 0.38f * sc;
+        glColor4f(0.05f, 0.05f, 0.15f, 0.95f);
+        glBegin(GL_POLYGON);
+        for (int i = 0; i < 24; i++) {
+            float a = i * 2.0f * 3.14159f / 24;
+            glVertex2f(ex + 0.18f * sc * cosf(a),
+                       ey + 0.22f * sc * sinf(a));
+        }
+        glEnd();
+        // Pupil gleam
+        glColor4f(0.7f, 0.85f, 1.0f, 0.70f);
+        glBegin(GL_POLYGON);
+        for (int i = 0; i < 12; i++) {
+            float a = i * 2.0f * 3.14159f / 12;
+            glVertex2f(ex + 0.07f * sc * cosf(a) - 0.04f * sc,
+                       ey + 0.09f * sc * sinf(a) + 0.05f * sc);
+        }
+        glEnd();
+    }
+
+    // Scowling mouth
+    glColor4f(0.05f, 0.05f, 0.15f, 0.90f);
+    glLineWidth(2.5f);
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= 12; i++) {
+        float t = (float)i / 12.0f;
+        float mx = gx + sc * (-0.4f + 0.8f * t);
+        float my = gy - 0.05f * sc + 0.18f * sc * sinf(t * 3.14159f);
+        glVertex2f(mx, my);
+    }
+    glEnd();
+    glLineWidth(1.0f);
+
+    glDisable(GL_BLEND);
+}
+
+void updateGhost() {
+    if (showEndScreen) return;
+    float targetX = charX + 4.75f;
+    float diff     = targetX - ghostPosX;
+    float chaseSpd = (doracakesCollected >= 3) ? 0.045f : 0.030f;
+    if      (diff >  0.05f) ghostPosX += chaseSpd;
+    else if (diff < -0.05f) ghostPosX -= chaseSpd;
+}
+
+void checkGhost() {
+    if (showEndScreen) return;
+
+    float csx = charX + 4.75f;
+    float csy = charY + 0.45f;
+
+    // Ghost is rounded, so distance hitbox works well here.
+    float dx  = csx - ghostPosX;
+    float dy  = csy - ghostPosY;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    if (dist < 1.6f) {
+        ghostIsHit = true;
+        damagePlayer();
+    } else {
+        ghostIsHit = false;
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  ADVANCED OBSTACLE PLACEMENT  (for Levels 4 & 5)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void placeObstaclesAdvanced(float speedMult) {
+    float minDist = 5.5f, minX = -3.0f, maxX = 9.0f;
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        bool valid = false;
+        while (!valid) {
+            int si     = rand() % totalScenes;
+            float lx   = minX + (rand()/(float)RAND_MAX) * (maxX - minX);
+            float cX   = si * sceneWidth + lx;
+            valid = true;
+            for (int j = 0; j < i; j++)
+                if (fabs(cX - obstaclePosX[j]) < minDist) { valid = false; break; }
+            if (valid) {
+                obstaclePosX[i]    = cX;
+                obstaclePosY[i]    = -6.0f;
+                obstacleLevel[i]   = currentLevel;
+                obstacleEnabled[i] = true;
+                obstacleHit[i]     = false;
+                obstacleRespawnTimer[i] = 0;
+                obstacleType[i]    = rand() % 3;
+
+                // Horizontal – always moving, scaled by speedMult
+                obstacleMoveSpeedX[i] = 0.050f * speedMult;
+                obstacleMoveDirX[i]   = (rand()%2 == 0) ? 1 : -1;
+                obstacleLeftBound[i]  = si * sceneWidth - 9.0f;
+                obstacleRightBound[i] = si * sceneWidth + 9.0f;
+
+                // Vertical – bouncing
+                obstacleMoveSpeedY[i] = 0.038f * speedMult;
+                obstacleMoveDirY[i]   = 1;
+                obstacleTopBound[i]   = -3.5f;
+                obstacleBottomBound[i]= -7.5f;
+
+                signAngle[i]      = 0.0f;
+                signRotateSpeed[i]= 5.0f * speedMult;
+            }
+        }
+    }
+}
+
