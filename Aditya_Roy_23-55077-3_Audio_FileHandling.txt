@@ -1,0 +1,252 @@
+// ══════════════════════════════════════════════════════════════
+// ░░  SOUND SYSTEM  (mciSendString — supports .mp3 .wav .mid) ░░
+// ══════════════════════════════════════════════════════════════
+//
+// HOW TO USE:
+//   1. Create a "sounds" folder next to your .exe
+//   2. Put your music/sfx files inside it
+//   3. Change the paths below to match your actual filenames
+//   4. Supported formats: .mp3, .wav, .mid (any format MCI supports)
+//   5. Link "winmm" in your project:
+//      Code::Blocks → Project → Build Options → Linker → Add → winmm
+//
+// ── Sound file paths ────────────────────────────────────────────
+// Custom music: create a file named music_config.txt next to the .exe,
+// then write your preferred music path inside it, for example:
+// sounds/my_music.mp3
+char SND_BGM[260]       = "sounds\\bgm.mp3";      // default background music (loops)
+const char* SND_COLLECT  = "sounds/collect.wav";   // cake collected
+const char* SND_HIT      = "sounds/hit.wav";       // obstacle hit
+const char* SND_LEVELUP  = "sounds/levelup.wav";   // level completed
+const char* SND_GAMEOVER = "sounds/gameover.wav";  // game over
+const char* SND_GAMEWIN  = "sounds/gamewin.wav";   // final win
+const char* MUSIC_CONFIG_FILE = "music_config.txt";
+
+bool bgmStarted = false;
+
+void loadMusicPreference() {
+    FILE* fp = fopen(MUSIC_CONFIG_FILE, "r");
+    if (fp) {
+        if (fgets(SND_BGM, sizeof(SND_BGM), fp)) {
+            // remove newline characters
+            SND_BGM[strcspn(SND_BGM, "\r\n")] = '\0';
+
+            // if the file is empty, use the default music
+            if (strlen(SND_BGM) == 0) {
+                strcpy(SND_BGM, "sounds\\bgm.mp3");
+            }
+        }
+        fclose(fp);
+    }
+}
+
+#ifdef _WIN32
+
+// ── Music error helper: shows the real reason if music fails ──
+void showMciError(MCIERROR error, const char* step)
+{
+    if (error != 0)
+    {
+        char errorText[256];
+        char message[700];
+
+        mciGetErrorString(error, errorText, 256);
+        sprintf(message,
+                "%s failed!\n\nMusic path used:\n%s\n\nError:\n%s\n\nFix: Keep bgm.mp3 inside a folder named sounds beside your .exe, or edit music_config.txt.",
+                step, SND_BGM, errorText);
+
+        MessageBox(NULL, message, "Music Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+// ── Background Music (loops forever using MCI) ──────────────
+void playBGM()
+{
+    MCIERROR error;
+    char cmd[512];
+
+    // Close any previously open bgm alias
+    mciSendString("stop bgm",  NULL, 0, NULL);
+    mciSendString("close bgm", NULL, 0, NULL);
+
+    // For MP3, Windows MCI is more reliable when type mpegvideo is given.
+    // If you use WAV instead, change type mpegvideo to type waveaudio.
+    sprintf(cmd, "open \"%s\" type mpegvideo alias bgm", SND_BGM);
+    error = mciSendString(cmd, NULL, 0, NULL);
+    if (error != 0)
+    {
+        showMciError(error, "Open music");
+        return;
+    }
+
+    // Play on infinite loop
+    error = mciSendString("play bgm repeat", NULL, 0, NULL);
+    if (error != 0)
+    {
+        showMciError(error, "Play music");
+        return;
+    }
+
+    bgmStarted = true;
+}
+
+void stopBGM() {
+    mciSendString("stop bgm",  NULL, 0, NULL);
+    mciSendString("close bgm", NULL, 0, NULL);
+    bgmStarted = false;
+}
+
+// ── Sound Effects (short one-shot sounds using MCI aliases) ──
+//    Each call closes then re-opens the alias so overlapping is safe.
+void playSound(const char* file) {
+    // Use a fixed alias "sfx" for general effects
+    mciSendString("close sfx", NULL, 0, NULL);
+    char cmd[512];
+    sprintf(cmd, "open \"%s\" alias sfx", file);
+    mciSendString(cmd, NULL, 0, NULL);
+    mciSendString("play sfx",  NULL, 0, NULL);
+}
+
+// Force-play: uses a second alias "sfx2" so it won't clip the first
+void playSoundForce(const char* file) {
+    mciSendString("close sfx2", NULL, 0, NULL);
+    char cmd[512];
+    sprintf(cmd, "open \"%s\" alias sfx2", file);
+    mciSendString(cmd, NULL, 0, NULL);
+    mciSendString("play sfx2",  NULL, 0, NULL);
+}
+
+#else
+// Placeholder stubs for non-Windows (Linux / Mac)
+void playBGM()  { bgmStarted = true; }
+void stopBGM()  { bgmStarted = false; }
+void playSound(const char*) {}
+void playSoundForce(const char*) {}
+#endif
+// ══════════════════════════════════════════════════════════════
+// ░░  PER-LEVEL HIGHSCORE FILE SAVE / LOAD  (plain text file)  ░░
+// ══════════════════════════════════════════════════════════════
+const char* HISCORE_FILE = "highscore.txt";
+
+void refreshCurrentHiScore() {
+    if (currentLevel >= 1 && currentLevel <= MAX_GAME_LEVELS)
+        hiScore = hiScoreByLevel[currentLevel];
+    else
+        hiScore = 0;
+}
+
+void saveHiScore() {
+    FILE* fp = fopen(HISCORE_FILE, "w");
+    if (fp) {
+        for (int lvl = 1; lvl <= MAX_GAME_LEVELS; lvl++) {
+            fprintf(fp, "Level %d %d\n", lvl, hiScoreByLevel[lvl]);
+        }
+        fclose(fp);
+    }
+}
+
+void loadHiScore() {
+    for (int lvl = 1; lvl <= MAX_GAME_LEVELS; lvl++)
+        hiScoreByLevel[lvl] = 0;
+
+    FILE* fp = fopen(HISCORE_FILE, "r");
+    if (fp) {
+        char word[32];
+        int lvl, value;
+
+        // New format: Level 1 500
+        // Old format support: one number only, saved as Level 1 best.
+        while (fscanf(fp, "%31s", word) == 1) {
+            if (strcmp(word, "Level") == 0) {
+                if (fscanf(fp, "%d %d", &lvl, &value) == 2) {
+                    if (lvl >= 1 && lvl <= MAX_GAME_LEVELS)
+                        hiScoreByLevel[lvl] = value;
+                }
+            } else {
+                value = atoi(word);
+                hiScoreByLevel[1] = value;
+                break;
+            }
+        }
+
+        fclose(fp);
+    }
+
+    refreshCurrentHiScore();
+}
+
+void updateHiScoreForCurrentLevel() {
+    if (currentLevel >= 1 && currentLevel <= MAX_GAME_LEVELS) {
+        if (levelScore > hiScoreByLevel[currentLevel]) {
+            hiScoreByLevel[currentLevel] = levelScore;
+            hiScore = hiScoreByLevel[currentLevel];
+            saveHiScore();
+        } else {
+            refreshCurrentHiScore();
+        }
+    }
+}
+
+void resetLevelScoreOnly() {
+    levelScore = 0;
+    refreshCurrentHiScore();
+}
+
+void resetFullScoreForNewGame() {
+    score = 0;
+    levelScore = 0;
+    refreshCurrentHiScore();
+}
+// ════════════════════════════════════════════════════════════
+//Doracake
+void drawEllipse(float cx, float cy, float rx, float ry, float r, float g, float b)
+{
+    int segments = 100;
+    glColor3f(r, g, b);
+    glBegin(GL_POLYGON);
+    for(int i = 0; i < segments; i++)
+    {
+        float theta = 2.0f * 3.1416f * i / segments;
+        glVertex2f(cx + rx*cos(theta), cy + ry*sin(theta));
+    }
+    glEnd();
+
+    glLineWidth(1);
+    glColor3f(0,0,0);
+    glBegin(GL_LINE_LOOP);
+    for(int i = 0; i < segments; i++)
+    {
+        float theta = 2.0f * 3.1416f * i / segments;
+        glVertex2f(cx + rx*cos(theta), cy + ry*sin(theta));
+    }
+    glEnd();
+}
+void Doracake()
+{
+    float d1_cx = (-1.50f + 1.16f)/2;
+    float d1_cy = (-0.72f + 0.89f)/2;
+    float d1_rx = (1.53f - (-1.50f))/2;
+    float d1_ry = (0.19f - (-0.72f))/2;
+    drawEllipse(d1_cx, d1_cy, d1_rx, d1_ry, 0.55f, 0.3f, 0.2f);
+
+    float c2_cx = (-1.68f + 1.32f)/2;
+    float c2_cy = (-0.46f + 0.85f)/2;
+    float c2_rx = (1.52f - (-1.68f))/2;
+    float c2_ry = (0.43f - (-0.46f))/2;
+    drawEllipse(c2_cx, c2_cy, c2_rx, c2_ry, 0.96f, 0.70f, 0.45f);
+
+    float c_cx = (-1.88f + 1.59f)/2;
+    float c_cy = (-0.14f + 0.76f)/2;
+    float c_rx = (1.59f - (-1.88f))/2;
+    float c_ry = (0.76f - (-0.14f))/2;
+    drawEllipse(c_cx, c_cy, c_rx, c_ry, 0.90f, 0.64f, 0.38f);
+
+    float d_cx = (-1.69f + 1.30f)/2;
+    float d_cy = (0.28f + 0.6f)/2;
+    float d_rx = (1.30f - (-1.69f))/2;
+    float d_ry = (1.20f - 0.28f)/2;
+    drawEllipse(d_cx, d_cy, d_rx, d_ry, 0.55f, 0.3f, 0.2f);
+    glEnd();
+
+    glFlush();
+}
