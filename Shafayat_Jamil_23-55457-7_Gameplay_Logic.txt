@@ -1,0 +1,1555 @@
+#define GL_SILENCE_DEPRECATION
+#include <stdio.h>
+#include <math.h>
+#include <GL/gl.h>
+#include <GL/glu.h>
+#include <GL/glut.h>
+#include <math.h>
+#include <iostream>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+// ── Sound system (Windows) ─────────────────────────────────
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "winmm.lib")
+#endif
+#endif
+#define TOTAL_OBSTACLES 4
+#define TOTAL_FIRES 3
+#define TOTAL_STONES 3
+
+//Character Movement
+float charX = -9.7f;
+float charY = -7.5f;
+bool moving = false;
+bool jumping = false;
+int facing = 1;
+float legAngle = 0.0f;
+int legDir = 1;
+float jumpSpeed = 0.1f;
+
+float _moveSpeed = 0.2f;
+float _legSwingSpeed = 2.0f;
+float _jumpSpeed = 0.2f;
+float _legResetSpeed = 2.0f;
+float _maxLegAngle = 3.0f;
+
+//Scene Movement
+float worldX = 0.0f;
+int sceneCount = 1;
+int totalScenes = 4;
+float sceneWidth = 23.0f;
+
+// Doracakes
+float doracakeX[10];
+float doracakeY[10];
+bool doracakeCollected[10] = { false };
+int totalDoracakes = 10;
+int doracakesCollected = 0;
+
+// Hearts
+float heartX[3];
+float heartY[3];
+bool heartLost[3] = { false, false, false };
+int totalHearts = 3;
+int lives = 3;
+int totalLevels = 3;
+int currentLevel = 0;
+
+// Game end screen
+bool showEndScreen = false;
+bool gameWon = false;
+bool showHome = true;
+
+void advanceToNextLevel() {
+    playSoundForce(SND_LEVELUP);
+    saveHiScore();
+    int nextLvl = currentLevel + 1;
+
+    doracakesCollected = 0;
+    for (int i = 0; i < 10; i++) doracakeCollected[i] = false;
+    for (int i = 0; i < 3; i++)  heartLost[i] = false;
+    lives = totalHearts;
+
+    charX = -9.5f;  charY = -7.5f;
+    worldX = 0.0f;  sceneCount = 0;
+    isInvincible = false;  isFlashing = false;
+    moving = false; jumping = false;
+
+    currentLevel = nextLvl;
+    resetLevelScoreOnly();
+    if (currentLevel == 2) level2Started = false;
+    if (currentLevel == 3) level3Started = false;
+    if (currentLevel == 4) level4Started = false;
+    if (currentLevel == 5) level5Started = false;
+}
+
+void completeLevelAndReturnHome()
+{
+    // Save current level score, then return to level selection.
+    updateHiScoreForCurrentLevel();
+    saveHiScore();
+    playSoundForce(SND_LEVELUP);
+
+    doracakesCollected = 0;
+    for (int i = 0; i < 10; i++) doracakeCollected[i] = false;
+    for (int i = 0; i < 3; i++)  heartLost[i] = false;
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) obstacleHit[i] = false;
+    for (int i = 0; i < TOTAL_FIRES; i++) fireHit[i] = false;
+    for (int i = 0; i < TOTAL_STONES; i++) stoneHit[i] = false;
+    for (int i = 0; i < ROCK_COUNT; i++) rockIsHit[i] = false;
+    ghostIsHit = false;
+
+    lives = totalHearts;
+    charX = -9.5f;
+    charY = -7.5f;
+    worldX = 0.0f;
+    sceneCount = 0;
+
+    moving = false;
+    jumping = false;
+    isInvincible = false;
+    invincTimer = 0.0f;
+    isFlashing = false;
+    hitFlashTimer = 0.0f;
+    gamePaused = false;
+
+    // Reset level-start flags so the same or another level can be opened fresh.
+    level1Started = false;
+    level2Started = false;
+    level3Started = false;
+    level4Started = false;
+    level5Started = false;
+
+    // Start next selected level with a clean score, but keep saved high scores.
+    score = 0;
+    levelScore = 0;
+    refreshCurrentHiScore();
+
+    showEndScreen = false;
+    gameWon = false;
+    showHome = true;
+}
+void drawText(float x, float y, const char* text) {
+    glRasterPos2f(x, y);
+    for (int i = 0; text[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, text[i]);
+    }
+}
+
+void drawButton(float x, float y, float w, float h, const char* label)
+{
+
+    glColor3f(0.2f, 0.4f, 0.8f);
+    glBegin(GL_QUADS);
+        glVertex2f(x, y);
+        glVertex2f(x + w, y);
+        glVertex2f(x + w, y - h);
+        glVertex2f(x, y - h);
+    glEnd();
+
+    glColor3f(0.0f, 0.0f, 0.0f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(x, y);
+        glVertex2f(x + w, y);
+        glVertex2f(x + w, y - h);
+        glVertex2f(x, y - h);
+    glEnd();
+
+    glColor3f(1.0f, 1.0f, 1.0f);
+    drawText(x + w / 4.0f, y - h / 1.5f, label);
+}
+
+
+void update(int value);
+void keyPress(unsigned char key, int x, int y) {
+    if (showHome || showEndScreen) return;
+    if (key == 'p' || key == 'P') {
+        gamePaused = !gamePaused;
+        if (!gamePaused)
+            glutTimerFunc(16, update, 0);
+    }
+}
+void homeScreen()
+{
+
+    // Title
+    glColor3f(0.1f, 0.1f, 0.1f);
+    drawText(-2.5f, 6.0f, "DORAEMON'S TREAT HUNT");
+
+    glPushMatrix();
+        glTranslatef(-6.0f, 3.0f, 0.0f);
+        glScalef(0.8f, 1.5f, 0.5f);
+        Doracake();
+    glPopMatrix();
+
+    glPushMatrix();
+        glTranslatef(-2.5f, -4.0f, 0.0f);
+         glScalef(0.8f, 1.5f, 0.5f);
+        Doracake();
+    glPopMatrix();
+
+    glPushMatrix();
+        glTranslatef(3.0f, 3.5f, 0.0f);
+         glScalef(0.8f, 1.5f, 0.5f);
+        Doracake();
+    glPopMatrix();
+
+    glPushMatrix();
+        glTranslatef(6.0f, -4.2f, 0.0f);
+         glScalef(0.8f, 1.5f, 0.5f);
+        Doracake();
+    glPopMatrix();
+
+
+    // Buttons
+    drawButton(-2.0f, 3.0f, 4.0f, 1.2f, "LEVEL 1");
+    drawButton(-2.0f, 1.0f, 4.0f, 1.2f, "LEVEL 2");
+    drawButton(-2.0f, -1.0f, 4.0f, 1.2f, "LEVEL 3");
+    drawButton(-2.0f, -3.0f, 4.0f, 1.2f, "LEVEL 4");
+    drawButton(-2.0f, -5.0f, 4.0f, 1.2f, "LEVEL 5");
+
+    glFlush();
+
+    glutSwapBuffers();
+
+}
+void drawEndScreen() {
+     if (!showEndScreen) return;
+    // Dark semi-transparent background
+    glColor4f(0, 0, 0, 0.7f);
+    glBegin(GL_QUADS);
+        glVertex2f(-5, -3); glVertex2f(5, -3);
+        glVertex2f(5, 3); glVertex2f(-5, 3);
+    glEnd();
+
+    // Message
+    glColor3f(0.5,0.5,0.5);
+    if (gameWon && currentLevel >= 5)
+        drawText(-2.7f, 1.0f, "ALL LEVELS CLEARED!");
+    else if (gameWon)
+        drawText(-1.0f, 1.0f, "You Win!");
+    else
+        drawText(-1.0f, 1.0f, "Game Over");
+
+    // ── Score display ─────────────────────────────────────────
+    char scoreBuf[64];
+    sprintf(scoreBuf, "Score: %d", score);
+    glColor3f(1.0f, 0.9f, 0.3f);
+    drawText(-1.1f, 0.3f, scoreBuf);
+
+    char hiBuf[64];
+    sprintf(hiBuf, "Level Best: %d", hiScore);
+    glColor3f(0.6f, 1.0f, 0.6f);
+    drawText(-1.1f, -0.2f, hiBuf);
+    // ─────────────────────────────────────────────────────────
+
+    // Main Menu button
+    glColor3f(0.2f, 0.4f, 0.8f);
+    glBegin(GL_QUADS);
+        glVertex2f(mainMenuX, mainMenuY);
+        glVertex2f(mainMenuX+buttonWidth, mainMenuY);
+        glVertex2f(mainMenuX+buttonWidth, mainMenuY+buttonHeight);
+        glVertex2f(mainMenuX, mainMenuY+buttonHeight);
+    glEnd();
+    glColor3f(1.0f,1.0f,1.0f);
+    drawText(mainMenuX+0.6f, mainMenuY+0.15f, "Main Menu");
+
+    // Restart button
+    glColor3f(0.2f, 0.4f, 0.8f);
+    glBegin(GL_QUADS);
+        glVertex2f(restartX, restartY);
+        glVertex2f(restartX+buttonWidth, restartY);
+        glVertex2f(restartX+buttonWidth, restartY+buttonHeight);
+        glVertex2f(restartX, restartY+buttonHeight);
+    glEnd();
+    glColor3f(1.0f,1.0f,1.0f);
+    drawText(restartX+1.0f, restartY+0.15f, "Restart");
+
+    // ── Next Level button (win only, levels 1 and 2) ──────────
+    if (gameWon && currentLevel < 5) {
+        glColor3f(0.1f, 0.6f, 0.2f);
+        glBegin(GL_QUADS);
+            glVertex2f(nextLevelX, nextLevelY);
+            glVertex2f(nextLevelX+buttonWidth, nextLevelY);
+            glVertex2f(nextLevelX+buttonWidth, nextLevelY+buttonHeight);
+            glVertex2f(nextLevelX, nextLevelY+buttonHeight);
+        glEnd();
+        glColor3f(1.0f,1.0f,1.0f);
+        drawText(nextLevelX+0.5f, nextLevelY+0.15f, "Next Level");
+    }
+    // ─────────────────────────────────────────────────────────
+}
+void Level1()
+{
+    currentLevel = 1;
+    drawLighting1();
+     glPushMatrix();
+       glTranslatef(0.0f, -2.5f, 0.0f);
+       glScalef(1.8f, 1.8f, 2.0f);
+       drawSky1();
+       glPopMatrix();
+
+
+       for (int i = 0; i <= totalScenes; i++)
+       {
+           glPushMatrix();
+           glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+
+           if (i % 2 == 0)
+               houseScene();
+           else
+               wallScene();
+
+           glPopMatrix();
+       }
+
+       glPushMatrix();
+       glTranslatef(charX, charY, 0.0f);
+       glTranslatef(((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+       glScalef((float)facing * 0.5f, 0.5f, 1.0f);
+       glTranslatef(-((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+       Doraemon();
+       glPopMatrix();
+
+       if (!level1Started) {
+               placeCollectibles();
+             //  placeObstacles();
+              placeStones();
+               level1Started = true;
+       }
+       for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+           if (!obstacleEnabled[i]) continue;
+           if (obstacleLevel[i] != currentLevel) continue;
+
+
+
+
+
+       }
+
+       for (int i = 0; i < 10; i++) {
+           if (!doracakeCollected[i]) {
+               glPushMatrix();
+               glTranslatef(doracakeX[i] + worldX, doracakeY[i], 0.0f);
+               glScalef(0.5f,1.2f, 0.0f);
+               Doracake();
+               glPopMatrix();
+           }
+       }
+
+       // Hearts
+       for (int i = 0; i < 3; i++) {
+           if (!heartLost[i]) {
+               glPushMatrix();
+               glTranslatef(heartX[i] + worldX, heartY[i], 0.0f);
+               glScalef(1.5f,1.2f, 0.0f);
+               Heart();
+               glPopMatrix();
+           }
+       }
+
+       drawEndScreen();
+    drawStones();
+       drawHUD();
+
+       if (showEndScreen) {
+       drawEndScreen();
+       }
+
+       // ── Level-1 extras ──────────────────────────────────
+       glDisable(GL_LIGHTING);
+       for (int ci = 0; ci < TOTAL_CLOUDS; ci++)
+           drawCloud(cloudX[ci], cloudY[ci], 0.9f);
+       drawGroundStrip(0.25f, 0.60f, 0.18f);
+       drawHitFlash();
+       if (gamePaused) drawPauseScreen();
+       // ────────────────────────────────────────────────────
+
+       glutSwapBuffers();
+
+}
+
+void Level2()
+{
+    currentLevel = 2;
+    //drawLighting2();
+    glPushMatrix();
+    glTranslatef(-9.5f, -17.2f, 0.0f);
+    glScalef(1.2f, 1.5f, 1.0f);
+    glNormal3f(0.0f, 0.0f, 1.0f);
+    drawSky2();
+    glPopMatrix();
+
+
+    for (int i = 0; i <= totalScenes; i++)
+    {
+        glPushMatrix();
+        glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+
+        if (i % 2 == 0)
+           houseScene();
+            else
+            wallScene();
+
+            glPopMatrix();
+        }
+
+    glPushMatrix();
+    glTranslatef(charX, charY, 0.0f);
+    glTranslatef(((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+    glScalef((float)facing * 0.5f, 0.5f, 1.0f);
+    glTranslatef(-((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+    Doraemon();
+    glPopMatrix();
+
+        if (!level2Started)
+        {
+                placeCollectibles();
+                placeObstacles();
+                placeManholeFire();
+                level2Started = true;
+        }
+
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        if (!obstacleEnabled[i]) continue;
+        if (obstacleLevel[i] != currentLevel) continue;
+
+        float drawX = obstaclePosX[i] + worldX;
+        float drawY = obstaclePosY[i];
+
+        drawRotatingSignBoard(drawX, drawY, i);
+
+    }
+
+
+        for (int i = 0; i < 5; i++) {
+            if (!doracakeCollected[i]) {
+                glPushMatrix();
+                glTranslatef(doracakeX[i] + worldX, doracakeY[i], 0.0f);
+                glScalef(0.5f,1.2f, 0.0f);
+                Doracake();
+                glPopMatrix();
+            }
+        }
+
+        // Hearts
+        for (int i = 0; i < 3; i++) {
+            if (!heartLost[i]) {
+                glPushMatrix();
+                glTranslatef(heartX[i] + worldX, heartY[i], 0.0f);
+                glScalef(1.5f,1.2f, 0.0f);
+                Heart();
+                glPopMatrix();
+            }
+        }
+
+
+       // drawEndScreen();
+        drawManholeFire();
+        drawHUD();
+
+        if (showEndScreen) {
+        drawEndScreen();
+        }
+
+        // ── Level-2 extras ──────────────────────────────────
+        drawGroundStrip(0.50f, 0.42f, 0.28f);
+        drawHitFlash();
+        if (gamePaused) drawPauseScreen();
+        // ────────────────────────────────────────────────────
+
+        glutSwapBuffers();
+
+}
+
+void Level3()
+{
+    currentLevel = 3;
+    glPushAttrib(GL_LIGHTING_BIT);
+        glDisable(GL_LIGHTING);
+       glPushMatrix();
+        glTranslatef(-9.5f, -17.2f, 0.0f);
+        glScalef(1.2f, 1.5f, 1.0f);
+        drawSky3();
+        glPopMatrix();
+
+        for (int i = 0; i <= totalScenes; i++)
+        {
+            glPushMatrix();
+            glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+
+            if (i % 2 == 0)
+                houseScene();
+            else
+                wallScene();
+
+            glPopMatrix();
+        }
+
+        glPushMatrix();
+        glTranslatef(charX, charY, 0.0f);
+        glTranslatef(((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+        glScalef((float)facing * 0.5f, 0.5f, 1.0f);
+        glTranslatef(-((0.0f+9.5f)/2.0f), 0.0f, 0.0f);
+        Doraemon();
+        glPopMatrix();
+
+        if (!level3Started) {
+                placeCollectibles();
+                placeObstacles();
+                level3Started = true;
+        }
+        for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+    if (!obstacleEnabled[i]) continue;
+    if (obstacleLevel[i] != currentLevel) continue;
+
+    float drawX = obstaclePosX[i] + worldX;
+    float drawY = obstaclePosY[i];
+
+    // Draw based on obstacle type
+    if (obstacleType[i] == 0) {
+        drawBall(drawX, drawY);           // Ball
+    }
+    else if (obstacleType[i] == 1) {
+        drawMouse(drawX, drawY, 3.0f);    // Mouse
+    }
+    else if (obstacleType[i] == 2) {
+        drawSpikyFruit(drawX, drawY, 3.0f); // Spiky Fruit
+    }
+}
+
+
+        for (int i = 0; i < 5; i++) {
+            if (!doracakeCollected[i]) {
+                glPushMatrix();
+                glTranslatef(doracakeX[i] + worldX, doracakeY[i], 0.0f);
+                glScalef(0.5f,1.2f, 0.0f);
+                Doracake();
+                glPopMatrix();
+            }
+        }
+
+        // Hearts
+        for (int i = 0; i < 3; i++) {
+            if (!heartLost[i]) {
+                glPushMatrix();
+                glTranslatef(heartX[i] + worldX, heartY[i], 0.0f);
+                glScalef(1.5f,1.2f, 0.0f);
+                Heart();
+                glPopMatrix();
+            }
+        }
+
+        glPushMatrix();
+        glColor4f(0.0f, 0.0f, 0.2f, 0.5f);
+        glBegin(GL_QUADS);
+        glVertex2f(-9.5f, -10.0f);
+        glVertex2f(9.5f, -10.0f);
+        glVertex2f(9.5f, 10.0f);
+        glVertex2f(-9.5f, 10.0f);
+        glEnd();
+        glPopMatrix();
+
+        for (int i = 0; i <= totalScenes; i++) {
+        glPushMatrix();
+        glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+        if (i % 2 == 0)
+        {
+            glTranslatef(3.5f, -4.2f, 0.0f);
+            glScalef(8.2f, 6.5f, -1.0f);
+            drawLampPost();
+        } else {
+            glTranslatef(3.5f, -4.2f, 0.0f);
+            glScalef(8.2f, 8.5f, 1.0f);
+            drawLampPost();
+        }
+        glPopMatrix();
+        }
+
+        drawEndScreen();
+
+        drawHUD();
+
+        if (showEndScreen) {
+        drawEndScreen();
+        }
+
+        // ── Level-3 extras ──────────────────────────────────
+        drawGroundStrip(0.22f, 0.20f, 0.30f);
+        drawHitFlash();
+        if (gamePaused) drawPauseScreen();
+        // ────────────────────────────────────────────────────
+
+        glPopAttrib();
+
+        glutSwapBuffers();
+
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  LEVEL 4 & 5  —  SKY FUNCTIONS  ░░
+// ══════════════════════════════════════════════════════════════
+
+void drawSky4()      // Rainy Dawn: deep orange → warm haze
+{
+    glBegin(GL_QUADS);
+    glColor3f(0.70f, 0.22f, 0.08f);
+    glVertex2f(0.0f, 20.0f);  glVertex2f(18.0f, 20.0f);
+    glColor3f(0.92f, 0.52f, 0.14f);
+    glVertex2f(18.0f,18.0f);  glVertex2f(0.0f, 18.0f);
+    glEnd();
+
+    glBegin(GL_QUADS);
+    glColor3f(0.92f, 0.52f, 0.14f);
+    glVertex2f(0.0f, 18.0f);  glVertex2f(18.0f, 18.0f);
+    glColor3f(0.97f, 0.74f, 0.32f);
+    glVertex2f(18.0f,13.5f);  glVertex2f(0.0f, 13.5f);
+    glEnd();
+
+    glBegin(GL_QUADS);
+    glColor3f(0.97f, 0.74f, 0.32f);
+    glVertex2f(0.0f, 13.5f);  glVertex2f(18.0f, 13.5f);
+    glColor3f(0.60f, 0.57f, 0.65f);
+    glVertex2f(18.0f,10.0f);  glVertex2f(0.0f, 10.0f);
+    glEnd();
+    glFlush();
+}
+
+void drawSky5()      // Storm Night: near-black navy → deep purple
+{
+    glBegin(GL_QUADS);
+    glColor3f(0.01f, 0.01f, 0.06f);
+    glVertex2f(0.0f, 20.0f);  glVertex2f(18.0f, 20.0f);
+    glColor3f(0.03f, 0.02f, 0.13f);
+    glVertex2f(18.0f,18.0f);  glVertex2f(0.0f, 18.0f);
+    glEnd();
+
+    glBegin(GL_QUADS);
+    glColor3f(0.03f, 0.02f, 0.13f);
+    glVertex2f(0.0f, 18.0f);  glVertex2f(18.0f, 18.0f);
+    glColor3f(0.07f, 0.04f, 0.20f);
+    glVertex2f(18.0f,13.5f);  glVertex2f(0.0f, 13.5f);
+    glEnd();
+
+    glBegin(GL_QUADS);
+    glColor3f(0.07f, 0.04f, 0.20f);
+    glVertex2f(0.0f, 13.5f);  glVertex2f(18.0f, 13.5f);
+    glColor3f(0.12f, 0.07f, 0.28f);
+    glVertex2f(18.0f,10.0f);  glVertex2f(0.0f, 10.0f);
+    glEnd();
+    glFlush();
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  RAIN SYSTEM  ░░
+// ══════════════════════════════════════════════════════════════
+
+// (initRain removed — rain feature deleted)
+
+
+// (updateRain removed)
+
+
+// (drawRain removed)
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  FALLING ROCKS  (Level 4 new hazard)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void initFallingRocks() {
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        int si = rand() % totalScenes;
+        rockPosX[i]    = si * sceneWidth + (-7.0f + (rand()/(float)RAND_MAX)*14.0f);
+        rockPosY[i]    = 6.0f + (rand()/(float)RAND_MAX) * 5.0f;
+        rockVelocity[i]= 0.055f + (rand()/(float)RAND_MAX) * 0.065f;
+        rockIsHit[i]   = false;
+    }
+}
+
+void updateFallingRocks() {
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        rockPosY[i] -= rockVelocity[i];
+        if (rockPosY[i] < -8.6f) {
+            int si = rand() % totalScenes;
+            rockPosX[i] = si * sceneWidth + (-7.0f + (rand()/(float)RAND_MAX)*14.0f);
+            rockPosY[i] = 9.5f;
+            rockIsHit[i] = false;
+        }
+    }
+}
+
+void drawFallingRocks() {
+    // Constant local array — 5 pts of the rock polygon
+    static const float px[5] = { 0.00f,  0.55f,  0.35f, -0.35f, -0.55f};
+    static const float py[5] = { 0.55f,  0.20f, -0.45f, -0.45f,  0.20f};
+
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        float dx = rockPosX[i] + worldX;
+        float dy = rockPosY[i];
+        if (dx < -12.0f || dx > 12.0f) continue;
+
+        // Fill
+        glColor3f(0.45f, 0.40f, 0.36f);
+        glBegin(GL_POLYGON);
+        for (int j = 0; j < 5; j++)
+            glVertex2f(dx + px[j], dy + py[j]);
+        glEnd();
+
+        // Dark outline
+        glColor3f(0.22f, 0.18f, 0.16f);
+        glLineWidth(2.0f);
+        glBegin(GL_LINE_LOOP);
+        for (int j = 0; j < 5; j++)
+            glVertex2f(dx + px[j], dy + py[j]);
+        glEnd();
+        glLineWidth(1.0f);
+
+        // Crack accent
+        glColor3f(0.18f, 0.14f, 0.12f);
+        glBegin(GL_LINES);
+            glVertex2f(dx - 0.08f, dy + 0.30f);
+            glVertex2f(dx + 0.22f, dy - 0.10f);
+            glVertex2f(dx + 0.22f, dy - 0.10f);
+            glVertex2f(dx + 0.05f, dy - 0.35f);
+        glEnd();
+
+        // Motion blur streak above rock
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.40f, 0.35f, 0.30f, 0.35f);
+        glBegin(GL_QUADS);
+            glVertex2f(dx - 0.35f, dy + 0.55f);
+            glVertex2f(dx + 0.35f, dy + 0.55f);
+            glVertex2f(dx + 0.20f, dy + 1.30f);
+            glVertex2f(dx - 0.20f, dy + 1.30f);
+        glEnd();
+        glDisable(GL_BLEND);
+    }
+}
+
+void checkFallingRocks() {
+    if (showEndScreen) return;
+
+    float csx = charX + 4.75f;
+    float csy = charY + 0.45f;
+
+    for (int i = 0; i < ROCK_COUNT; i++) {
+        float rx = rockPosX[i] + worldX;
+        float ry = rockPosY[i];
+
+        bool hit = centerAABB(csx, csy, CHAR_HB_W, CHAR_HB_H,
+                              rx, ry, 1.2f, 1.2f);
+
+        if (hit) {
+            rockIsHit[i] = true;
+            damagePlayer();
+        } else {
+            rockIsHit[i] = false;
+        }
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  TWINKLING STARS  (Level 5 sky decoration)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void initStars() {
+    for (int i = 0; i < STAR_COUNT; i++) {
+        starPosX[i]  = -9.5f + (rand()/(float)RAND_MAX) * 19.0f;
+        starPosY[i]  =  1.0f + (rand()/(float)RAND_MAX) *  9.0f;
+        starPhase[i] = (rand()/(float)RAND_MAX) * 6.2832f;
+    }
+}
+
+void drawStars() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPointSize(2.2f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < STAR_COUNT; i++) {
+        float bright = 0.45f + 0.55f * sinf(starTime5 * 0.028f + starPhase[i]);
+        glColor4f(1.0f, 0.98f, 0.88f, bright);
+        glVertex2f(starPosX[i], starPosY[i]);
+    }
+    glEnd();
+    // A few larger "bright" stars
+    glPointSize(3.8f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < STAR_COUNT; i += 12) {
+        float bright = 0.60f + 0.40f * sinf(starTime5 * 0.018f + starPhase[i] + 1.0f);
+        glColor4f(0.96f, 0.94f, 1.0f, bright);
+        glVertex2f(starPosX[i], starPosY[i]);
+    }
+    glEnd();
+    glPointSize(1.0f);
+    glDisable(GL_BLEND);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  LIGHTNING  (Level 5 visual hazard)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void updateLightning() {
+    lightningClock += 1.0f;
+    if (lightningClock >= LIGHTNING_PERIOD) {
+        lightningFlash = true;
+        lightningClock = 0.0f;
+        lightningBoltX = -4.0f + (rand()/(float)RAND_MAX) * 8.0f;
+    } else if (lightningFlash && lightningClock > 10.0f) {
+        lightningFlash = false;
+    }
+}
+
+void drawLightning() {
+    if (!lightningFlash) return;
+    float lx = lightningBoltX;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Screen-wide glow
+    glColor4f(0.88f, 0.94f, 1.0f, 0.22f);
+    glBegin(GL_QUADS);
+        glVertex2f(-9.5f,-10.0f); glVertex2f(9.5f,-10.0f);
+        glVertex2f( 9.5f, 10.0f); glVertex2f(-9.5f, 10.0f);
+    glEnd();
+
+    // Main bolt – white core
+    glColor4f(1.0f, 1.0f, 1.0f, 0.92f);
+    glLineWidth(3.5f);
+    glBegin(GL_LINE_STRIP);
+        glVertex2f(lx + 0.00f, 10.0f);
+        glVertex2f(lx + 0.40f,  6.5f);
+        glVertex2f(lx - 0.25f,  3.8f);
+        glVertex2f(lx + 0.50f,  1.0f);
+        glVertex2f(lx - 0.20f, -1.5f);
+        glVertex2f(lx + 0.30f, -4.5f);
+        glVertex2f(lx + 0.05f, -7.6f);
+    glEnd();
+
+    // Branch
+    glColor4f(0.8f, 0.9f, 1.0f, 0.65f);
+    glLineWidth(1.8f);
+    glBegin(GL_LINE_STRIP);
+        glVertex2f(lx - 0.25f,  3.8f);
+        glVertex2f(lx - 0.90f,  1.5f);
+        glVertex2f(lx - 1.30f, -0.5f);
+    glEnd();
+
+    glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  GHOST ENEMY  (Level 5 chasing hazard)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void resetGhost() {
+    ghostPosX  = charX - 18.0f;
+    ghostPosY  = -6.5f;
+    ghostIsHit = false;
+}
+
+void drawGhostEnemy(float gx, float gy) {
+    float sc = 1.25f;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Outer glow
+    glBegin(GL_POLYGON);
+    for (int i = 0; i < 40; i++) {
+        float a = i * 2.0f * 3.14159f / 40;
+        float br = sc * (1.25f + 0.08f * sinf(a * 3));
+        glColor4f(0.55f, 0.80f, 1.0f, 0.18f);
+        glVertex2f(gx + br * cosf(a), gy + br * 1.3f * sinf(a));
+    }
+    glEnd();
+
+    // Body – top semicircle
+    glBegin(GL_POLYGON);
+    for (int i = 0; i <= 180; i++) {
+        float a = i * 3.14159f / 180.0f;
+        glColor4f(0.78f, 0.92f, 1.0f, 0.80f);
+        glVertex2f(gx + sc * cosf(a), gy + sc * 1.4f * sinf(a));
+    }
+    // Wavy hem at the bottom
+    for (int i = 0; i <= 8; i++) {
+        float t  = (float)i / 8.0f;
+        float wx = gx + sc * (1.0f - 2.0f * t);
+        float wy = gy - sc * 0.50f * (1.0f + 0.40f * sinf(t * 3.14159f * 3));
+        glColor4f(0.78f, 0.92f, 1.0f, 0.80f);
+        glVertex2f(wx, wy);
+    }
+    glEnd();
+
+    // Eyes – dark
+    for (int side = -1; side <= 1; side += 2) {
+        float ex = gx + side * 0.36f * sc;
+        float ey = gy + 0.38f * sc;
+        glColor4f(0.05f, 0.05f, 0.15f, 0.95f);
+        glBegin(GL_POLYGON);
+        for (int i = 0; i < 24; i++) {
+            float a = i * 2.0f * 3.14159f / 24;
+            glVertex2f(ex + 0.18f * sc * cosf(a),
+                       ey + 0.22f * sc * sinf(a));
+        }
+        glEnd();
+        // Pupil gleam
+        glColor4f(0.7f, 0.85f, 1.0f, 0.70f);
+        glBegin(GL_POLYGON);
+        for (int i = 0; i < 12; i++) {
+            float a = i * 2.0f * 3.14159f / 12;
+            glVertex2f(ex + 0.07f * sc * cosf(a) - 0.04f * sc,
+                       ey + 0.09f * sc * sinf(a) + 0.05f * sc);
+        }
+        glEnd();
+    }
+
+    // Scowling mouth
+    glColor4f(0.05f, 0.05f, 0.15f, 0.90f);
+    glLineWidth(2.5f);
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= 12; i++) {
+        float t = (float)i / 12.0f;
+        float mx = gx + sc * (-0.4f + 0.8f * t);
+        float my = gy - 0.05f * sc + 0.18f * sc * sinf(t * 3.14159f);
+        glVertex2f(mx, my);
+    }
+    glEnd();
+    glLineWidth(1.0f);
+
+    glDisable(GL_BLEND);
+}
+
+void updateGhost() {
+    if (showEndScreen) return;
+    float targetX = charX + 4.75f;
+    float diff     = targetX - ghostPosX;
+    float chaseSpd = (doracakesCollected >= 3) ? 0.045f : 0.030f;
+    if      (diff >  0.05f) ghostPosX += chaseSpd;
+    else if (diff < -0.05f) ghostPosX -= chaseSpd;
+}
+
+void checkGhost() {
+    if (showEndScreen) return;
+
+    float csx = charX + 4.75f;
+    float csy = charY + 0.45f;
+
+    // Ghost is rounded, so distance hitbox works well here.
+    float dx  = csx - ghostPosX;
+    float dy  = csy - ghostPosY;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    if (dist < 1.6f) {
+        ghostIsHit = true;
+        damagePlayer();
+    } else {
+        ghostIsHit = false;
+    }
+
+    finishGameOverIfNeeded();
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ░░  ADVANCED OBSTACLE PLACEMENT  (for Levels 4 & 5)  ░░
+// ══════════════════════════════════════════════════════════════
+
+void placeObstaclesAdvanced(float speedMult) {
+    float minDist = 5.5f, minX = -3.0f, maxX = 9.0f;
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        bool valid = false;
+        while (!valid) {
+            int si     = rand() % totalScenes;
+            float lx   = minX + (rand()/(float)RAND_MAX) * (maxX - minX);
+            float cX   = si * sceneWidth + lx;
+            valid = true;
+            for (int j = 0; j < i; j++)
+                if (fabs(cX - obstaclePosX[j]) < minDist) { valid = false; break; }
+            if (valid) {
+                obstaclePosX[i]    = cX;
+                obstaclePosY[i]    = -6.0f;
+                obstacleLevel[i]   = currentLevel;
+                obstacleEnabled[i] = true;
+                obstacleHit[i]     = false;
+                obstacleRespawnTimer[i] = 0;
+                obstacleType[i]    = rand() % 3;
+
+                // Horizontal – always moving, scaled by speedMult
+                obstacleMoveSpeedX[i] = 0.050f * speedMult;
+                obstacleMoveDirX[i]   = (rand()%2 == 0) ? 1 : -1;
+                obstacleLeftBound[i]  = si * sceneWidth - 9.0f;
+                obstacleRightBound[i] = si * sceneWidth + 9.0f;
+
+                // Vertical – bouncing
+                obstacleMoveSpeedY[i] = 0.038f * speedMult;
+                obstacleMoveDirY[i]   = 1;
+                obstacleTopBound[i]   = -3.5f;
+                obstacleBottomBound[i]= -7.5f;
+
+                signAngle[i]      = 0.0f;
+                signRotateSpeed[i]= 5.0f * speedMult;
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  LEVEL 4  —  "Rainy Dawn"  ░░
+//   • Dawn sky, falling rocks, fast signboard
+//     obstacles, all 3 manhole fires
+// ══════════════════════════════════════════════════════════════
+
+void Level4()
+{
+    currentLevel = 4;
+
+    // Sky
+    glPushMatrix();
+    glTranslatef(-9.5f, -17.2f, 0.0f);
+    glScalef(1.2f, 1.5f, 1.0f);
+    drawSky4();
+    glPopMatrix();
+
+    // Scenes
+    for (int i = 0; i <= totalScenes; i++) {
+        glPushMatrix();
+        glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+        if (i % 2 == 0) houseScene(); else wallScene();
+        glPopMatrix();
+    }
+
+    // Doraemon
+    glPushMatrix();
+    glTranslatef(charX, charY, 0.0f);
+    glTranslatef(((0.0f + 9.5f) / 2.0f), 0.0f, 0.0f);
+    glScalef((float)facing * 0.5f, 0.5f, 1.0f);
+    glTranslatef(-((0.0f + 9.5f) / 2.0f), 0.0f, 0.0f);
+    Doraemon();
+    glPopMatrix();
+
+    if (!level4Started) {
+        placeCollectibles();
+        placeObstaclesAdvanced(1.35f);   // 35% faster than base
+        placeManholeFire();
+        initFallingRocks();
+        level4Started = true;
+    }
+
+    // Obstacles – rotating signboards (same style as Level 2)
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        if (!obstacleEnabled[i] || obstacleLevel[i] != currentLevel) continue;
+        drawRotatingSignBoard(obstaclePosX[i] + worldX, obstaclePosY[i], i);
+    }
+
+    // Collectibles
+    for (int i = 0; i < 10; i++) {
+        if (!doracakeCollected[i]) {
+            glPushMatrix();
+            glTranslatef(doracakeX[i] + worldX, doracakeY[i], 0.0f);
+            glScalef(0.5f, 1.2f, 0.0f);
+            Doracake();
+            glPopMatrix();
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!heartLost[i]) {
+            glPushMatrix();
+            glTranslatef(heartX[i] + worldX, heartY[i], 0.0f);
+            glScalef(1.5f, 1.2f, 0.0f);
+            Heart();
+            glPopMatrix();
+        }
+    }
+
+    drawManholeFire();
+    drawFallingRocks();
+
+    // Dark overlay for atmosphere
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.10f, 0.12f, 0.25f, 0.18f);
+    glBegin(GL_QUADS);
+        glVertex2f(-9.5f,-10.0f); glVertex2f(9.5f,-10.0f);
+        glVertex2f( 9.5f, 10.0f); glVertex2f(-9.5f, 10.0f);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    drawHUD();
+    if (showEndScreen) drawEndScreen();
+
+    drawGroundStrip(0.26f, 0.30f, 0.36f);   // wet concrete
+    drawHitFlash();
+    if (gamePaused) drawPauseScreen();
+
+    glutSwapBuffers();
+}
+
+// ══════════════════════════════════════════════════════════════
+// ░░  LEVEL 5  —  "Storm Night"  ░░
+//   • Deep-night sky with twinkling stars, lightning bolts,
+//     chasing ghost, all mixed obstacle types (fastest speed),
+//     lamp-posts, manhole fires
+// ══════════════════════════════════════════════════════════════
+
+void Level5()
+{
+    currentLevel = 5;
+    glPushAttrib(GL_LIGHTING_BIT);
+    glDisable(GL_LIGHTING);
+
+    // Sky
+    glPushMatrix();
+    glTranslatef(-9.5f, -17.2f, 0.0f);
+    glScalef(1.2f, 1.5f, 1.0f);
+    drawSky5();
+    glPopMatrix();
+
+    // Stars
+    drawStars();
+
+    // Scenes
+    for (int i = 0; i <= totalScenes; i++) {
+        glPushMatrix();
+        glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+        if (i % 2 == 0) houseScene(); else wallScene();
+        glPopMatrix();
+    }
+
+    // Lamp-posts (identical to Level 3)
+    for (int i = 0; i <= totalScenes; i++) {
+        glPushMatrix();
+        glTranslatef(worldX + i * sceneWidth, 0.0f, 0.0f);
+        if (i % 2 == 0) { glTranslatef(3.5f,-4.2f,0.0f); glScalef(8.2f, 6.5f,-1.0f); }
+        else             { glTranslatef(3.5f,-4.2f,0.0f); glScalef(8.2f, 8.5f, 1.0f); }
+        drawLampPost();
+        glPopMatrix();
+    }
+
+    // Doraemon
+    glPushMatrix();
+    glTranslatef(charX, charY, 0.0f);
+    glTranslatef(((0.0f + 9.5f) / 2.0f), 0.0f, 0.0f);
+    glScalef((float)facing * 0.5f, 0.5f, 1.0f);
+    glTranslatef(-((0.0f + 9.5f) / 2.0f), 0.0f, 0.0f);
+    Doraemon();
+    glPopMatrix();
+
+    if (!level5Started) {
+        placeCollectibles();
+        placeObstaclesAdvanced(1.85f);   // 85% faster — hardest
+        placeManholeFire();
+        initStars();
+        resetGhost();
+        level5Started = true;
+    }
+
+    // Obstacles – mixed types (Ball / Mouse / Spiky), same as Level 3
+    for (int i = 0; i < TOTAL_OBSTACLES; i++) {
+        if (!obstacleEnabled[i] || obstacleLevel[i] != currentLevel) continue;
+        float dx = obstaclePosX[i] + worldX;
+        float dy = obstaclePosY[i];
+        if      (obstacleType[i] == 0) drawBall(dx, dy);
+        else if (obstacleType[i] == 1) drawMouse(dx, dy, 3.0f);
+        else                            drawSpikyFruit(dx, dy, 3.0f);
+    }
+
+    // Collectibles
+    for (int i = 0; i < 10; i++) {
+        if (!doracakeCollected[i]) {
+            glPushMatrix();
+            glTranslatef(doracakeX[i] + worldX, doracakeY[i], 0.0f);
+            glScalef(0.5f, 1.2f, 0.0f);
+            Doracake();
+            glPopMatrix();
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!heartLost[i]) {
+            glPushMatrix();
+            glTranslatef(heartX[i] + worldX, heartY[i], 0.0f);
+            glScalef(1.5f, 1.2f, 0.0f);
+            Heart();
+            glPopMatrix();
+        }
+    }
+
+    // Heavy-night overlay
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.0f, 0.0f, 0.22f, 0.48f);
+    glBegin(GL_QUADS);
+        glVertex2f(-9.5f,-10.0f); glVertex2f(9.5f,-10.0f);
+        glVertex2f( 9.5f, 10.0f); glVertex2f(-9.5f, 10.0f);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    drawManholeFire();
+    drawLightning();
+    drawGhostEnemy(ghostPosX, ghostPosY);
+
+    drawHUD();
+    if (showEndScreen) drawEndScreen();
+
+    drawGroundStrip(0.14f, 0.11f, 0.20f);   // very dark stormy ground
+    drawHitFlash();
+    if (gamePaused) drawPauseScreen();
+
+    glPopAttrib();
+    glutSwapBuffers();
+}
+void specialKeyPress(int key, int x, int y) {
+    if (showEndScreen) return;
+    switch(key) {
+        case GLUT_KEY_RIGHT:
+            facing = 1;
+            moving = true;
+            break;
+        case GLUT_KEY_LEFT:
+            facing = -1;
+            moving = true;
+            break;
+        case GLUT_KEY_UP:
+            if (!jumping && charY <= -7.5f + 0.01f)
+                jumping = true;
+            break;
+    }
+}
+
+void specialKeyRelease(int key, int x, int y) {
+    if (showEndScreen) return;
+    switch(key) {
+        case GLUT_KEY_RIGHT:
+        case GLUT_KEY_LEFT:
+            moving = false;
+            break;
+    }
+}
+void mouseClick(int button, int state, int x, int y)
+{
+    if (button != GLUT_LEFT_BUTTON || state != GLUT_DOWN) return;
+
+    int winW = glutGet(GLUT_WINDOW_WIDTH);
+    int winH = glutGet(GLUT_WINDOW_HEIGHT);
+
+    float fx = ((float)x / winW) * 20.0f - 10.0f;
+    float fy = 10.0f - ((float)y / winH) * 20.0f;
+
+    if (showHome)
+    {
+        // Start BGM on first level select (avoids autoplay block)
+        if (!bgmStarted) playBGM();
+
+        // LEVEL 1
+        if (fx >= -2.0f && fx <= 2.0f && fy <= 3.0f && fy >= 1.8f) {
+            currentLevel = 1;
+            resetFullScoreForNewGame();
+            showHome = false;
+            return;
+        }
+
+        // LEVEL 2
+        if (fx >= -2.0f && fx <= 2.0f && fy <= 1.0f && fy >= -0.2f) {
+            currentLevel = 2;
+            resetFullScoreForNewGame();
+            showHome = false;
+            return;
+        }
+
+        // LEVEL 3
+        if (fx >= -2.0f && fx <= 2.0f && fy <= -1.0f && fy >= -2.2f) {
+            currentLevel = 3;
+            resetFullScoreForNewGame();
+            showHome = false;
+            return;
+        }
+
+        // LEVEL 4
+        if (fx >= -2.0f && fx <= 2.0f && fy <= -3.0f && fy >= -4.2f) {
+            currentLevel = 4;
+            resetFullScoreForNewGame();
+            showHome = false;
+            return;
+        }
+
+        // LEVEL 5
+        if (fx >= -2.0f && fx <= 2.0f && fy <= -5.0f && fy >= -6.2f) {
+            currentLevel = 5;
+            resetFullScoreForNewGame();
+            showHome = false;
+            return;
+        }
+    }
+
+    if (showEndScreen)
+    {
+        // ── Next Level (win, levels 1-2) ──────────────────────
+        if (gameWon && currentLevel < 5) {
+            if (fx >= nextLevelX && fx <= nextLevelX + buttonWidth &&
+                fy >= nextLevelY && fy <= nextLevelY + buttonHeight)
+            {
+                int prevLevel = currentLevel;
+                showEndScreen = false;
+                doracakesCollected = 0;
+                for (int i = 0; i < 10; i++) doracakeCollected[i] = false;
+                for (int i = 0; i < 3; i++)  heartLost[i] = false;
+                lives = totalHearts;
+                charX = -9.5f; charY = -7.5f;
+                worldX = 0.0f; sceneCount = 0;
+                isInvincible = false; isFlashing = false;
+                currentLevel = prevLevel + 1;
+                resetLevelScoreOnly();
+                if (currentLevel == 2) level2Started = false;
+                if (currentLevel == 3) level3Started = false;
+                if (currentLevel == 4) level4Started = false;
+                if (currentLevel == 5) level5Started = false;
+                return;
+            }
+        }
+        // ─────────────────────────────────────────────────────
+
+        // Main Menu
+        if (fx >= mainMenuX && fx <= mainMenuX + buttonWidth &&
+            fy >= mainMenuY && fy <= mainMenuY + buttonHeight)
+        {
+            doracakesCollected = 0;
+            lives = totalHearts;
+            charX = -9.5f;
+            charY = -7.5f;
+            worldX = 0.0f;
+            sceneCount = 0;
+            resetFullScoreForNewGame();
+
+            showEndScreen = false;
+            showHome = true;
+            return;
+        }
+
+        if (fx >= restartX && fx <= restartX + buttonWidth &&
+            fy >= restartY && fy <= restartY + buttonHeight)
+        {
+            showEndScreen = false;
+
+            doracakesCollected = 0;
+            lives = totalHearts;
+
+            for (int i = 0; i < 10; i++) doracakeCollected[i] = false;
+            for (int i = 0; i < 3; i++)  heartLost[i] = false;
+
+            placeCollectibles();
+
+            charX = -9.5f;
+            charY = -7.5f;
+            worldX = 0.0f;
+            sceneCount = 0;
+            resetFullScoreForNewGame();
+            isInvincible = false;
+            isFlashing   = false;
+
+            return;
+        }
+    }
+}
+void update(int value)
+{
+    // ── Pause guard ────────────────────────────────────────
+    if (gamePaused) {
+        glutTimerFunc(16, update, 0);
+        return;
+    }
+    // ─────────────────────────────────────────────────────
+
+    if(moving && jumping)
+    {
+        legAngle = 0.0f;
+    }
+
+    if (moving)
+    {
+        legAngle += legDir * _legSwingSpeed;
+        if (legAngle > _maxLegAngle || legAngle < -_maxLegAngle)
+            legDir *= -1;
+    }
+    else
+    {
+        if (legAngle > 0.0f)
+            legAngle -= _legResetSpeed;
+        else if (legAngle < 0.0f)
+            legAngle += _legResetSpeed;
+
+        if (legAngle < 1.0f && legAngle > -1.0f)
+            legAngle = 0.0f;
+    }
+
+    if (jumping)
+    {
+        charY += _jumpSpeed;
+        if (charY >= -7.5f + 6.0f)
+            jumping = false;
+    }
+    else if (charY > -7.5f)
+    {
+        charY -= _jumpSpeed;
+        if (charY < -7.5f)
+            charY = -7.5f;
+    }
+
+    if (moving)
+    {
+        if (facing == 1)
+        {
+            if (sceneCount < totalScenes && charX >= -6.0f)
+            {
+                charX = -6.0f;
+                worldX -= _moveSpeed;
+
+                if (worldX <= -(sceneCount + 1) * sceneWidth)
+                    sceneCount++;
+            }
+            else
+                charX += _moveSpeed;
+        }
+
+        else if (facing == -1)
+        {
+            if (sceneCount > 0 && charX <= -5.0f)
+            {
+                charX = -5.0f;
+                worldX += _moveSpeed;
+
+                if (worldX >= -(sceneCount - 1) * sceneWidth)
+                    sceneCount--;
+            }
+             else
+                charX -= _moveSpeed;
+        }
+    }
+
+    if (sceneCount >= totalScenes)
+    {
+        if (charX > 3.2f) charX = 3.2f;
+    }
+    if (sceneCount <= 0)
+    {
+        if (charX < -12.5f) charX = -12.5f;
+    }
+
+    updateObstacles();
+    checkObstacles();
+    checkCollectibles();
+    updateManholeFire();
+    checkManholeFire();
+    checkStones();
+
+    // ── Invincibility timer ───────────────────────────────
+    if (isInvincible) {
+        invincTimer += 1.0f;
+        if (invincTimer >= INVINC_DURATION)
+            isInvincible = false;
+    }
+
+    // ── Hit-flash countdown ───────────────────────────────
+    if (isFlashing) {
+        hitFlashTimer -= 1.0f;
+        if (hitFlashTimer <= 0.0f) {
+            isFlashing    = false;
+            hitFlashTimer = 0.0f;
+        }
+    }
+
+    // ── Animate clouds (Level 1) ──────────────────────────
+    if (!showHome && currentLevel == 1)
+        updateClouds();
+    // ─────────────────────────────────────────────────────
+
+    // ── Level 4: falling rocks ──────────────────────────
+    if (!showHome && currentLevel == 4) {
+        updateFallingRocks();
+        checkFallingRocks();
+    }
+    // ── Level 5: ghost + lightning + stars ────────────────
+    if (!showHome && currentLevel == 5) {
+        starTime5 += 1.0f;
+        updateGhost();
+        checkGhost();
+        updateLightning();
+    }
+    // ─────────────────────────────────────────────────────
+
+    glutPostRedisplay();
+    glutTimerFunc(16, update, 0);
+}
+void display() {
+    if (showHome) {
+        glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
+    } else {
+        glClearColor(0.8f, 0.8f, 0.8f, 1.0f);
+    }
+    //printf("showHome=%d  currentLevel=%d\n", showHome, currentLevel);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+     if (showHome) {
+        homeScreen();
+    }
+    else {
+        if      (currentLevel == 1) Level1();
+        else if (currentLevel == 2) Level2();
+        else if (currentLevel == 3) Level3();
+        else if (currentLevel == 4) Level4();
+        else if (currentLevel == 5) Level5();
+    }
+
+
+
+}
+
+
+void init()
+{
+    glDepthFunc(GL_LEQUAL);
+    glClearColor(0.8, 0.8, 0.8, 1.0);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluOrtho2D(-9.50, 9.50, -10.0, 10.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+
+}
+
+int main(int argc, char** argv) {
+    srand((unsigned int)time(NULL));   // seed random
+    loadMusicPreference();             // load custom background music path
+    loadHiScore();                     // load saved high scores for each level
+
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Doraemon's Treat Hunt");
+    init();
+    glutDisplayFunc(display);
+    glutSpecialFunc(specialKeyPress);
+    glutSpecialUpFunc(specialKeyRelease);
+    glutMouseFunc(mouseClick);
+    glutKeyboardFunc(keyPress);   // P = pause
+    glutTimerFunc(16, update, 0);
+
+    glutMainLoop();
+    return 0;
+}
